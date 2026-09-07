@@ -1,0 +1,236 @@
+=== SKYFORM MESH-ONLY DEBUG REPORT ===
+
+SCOPE
+
+Only errors.txt was changed in this investigation.
+ReconstructionViewer.jsx was NOT modified.
+PointCloud, ConfidenceMap, CameraTrajectory, Scene structure, backend code, and the reconstruction output were NOT modified.
+
+CURRENT SOURCE INSPECTED
+
+frontend/src/components/ReconstructionViewer.jsx
+frontend/src/styles/global.css
+frontend/src/pages/Dashboard.jsx
+frontend/src/api/videoApi.js
+
+MESH ASSET CHECK
+
+URL:
+http://localhost:8000/outputs/reconstruction/mesh.ply
+
+The endpoint returned HTTP 200 OK.
+The served PLY header contains:
+- binary_little_endian PLY
+- 66034 vertices
+- 43115 faces
+- property list uchar uint vertex_indices
+- x/y/z positions
+- nx/ny/nz normals
+- uchar red/green/blue colors
+
+PLYLoader probe against the live endpoint produced:
+
+mesh.ply {
+  positionCount: 66034,
+  indexCount: 129345,
+  drawRange: { start: 0, count: Infinity },
+  boundingBox: {
+    min: [-9.957009315490723, -1.965187430381775, 6.493610858917236],
+    max: [5.167029857635498, 7.839407920837402, 15.456552505493164]
+  },
+  boundingSphere: {
+    center: [-2.3949897289276123, 2.9371102452278137, 10.9750816822052],
+    radius: 9.444847634900972
+  },
+  color: {
+    count: 66034,
+    itemSize: 3,
+    normalized: true,
+    array: Uint8Array
+  },
+  normal: {
+    count: 66034,
+    itemSize: 3,
+    array: Float64Array
+  },
+  indexValid: true,
+  indexMin: 0,
+  indexMax: 66031
+}
+
+The JSON representation printed drawRange.count as null because JavaScript JSON.stringify converts Infinity to null. The actual Three.js default draw range is count Infinity, so the mesh is not hidden by drawRange.
+
+The point cloud bounds were nearly identical:
+- point positionCount: 72576
+- point bounding box min: [-10.12552547454834, -2.122083902359009, 6.493610858917236]
+- point bounding box max: [5.411133766174316, 7.886356353759766, 15.497157096862793]
+- point bounding sphere radius: 9.511952225372206
+
+CONCLUSIONS FROM THE PLY PROBE
+
+1. PLYLoader parses the mesh successfully in Node.
+2. position.count is 66034.
+3. geometry.index.count is 129345, exactly 43115 triangles x 3 indices.
+4. Every index is within [0, 66033]. The observed maximum is 66031.
+5. geometry.drawRange is the full default range.
+6. boundingBox and boundingSphere are finite.
+7. Vertex colors are normalized Uint8Array RGB data, which Three.js materials can consume as vertex colors.
+8. The geometry requires 32-bit element indices because it references more than 65535 vertices. This is the main Mesh-only WebGL compatibility risk. If the browser context is WebGL1 without OES_element_index_uint, the indexed mesh can fail to render even though Open3D and PLYLoader accept it. A WebGL2 context supports this index type.
+9. The mesh and point-cloud bounds are nearly the same, so the mesh data itself is not obviously outside the camera.
+10. No manual triangulation or index creation is required.
+
+MESH MODEL SOURCE FINDINGS
+
+File: frontend/src/components/ReconstructionViewer.jsx
+Lines: 206-353
+
+The loader success callback is:
+
+loader.load(
+  `${API}/outputs/reconstruction/mesh.ply`,
+  (loadedGeometry) => {
+    loadedGeometry.computeBoundingBox();
+    loadedGeometry.computeBoundingSphere();
+    ...
+    onSceneTransform(...);
+    setGeometry(loadedGeometry);
+  },
+  undefined,
+  (loadError) => { ... }
+);
+
+Static source result:
+- The success callback is correctly wired.
+- The error callback is correctly wired.
+- The callback logs "Mesh loaded" and the position count.
+- The mesh is inserted as <mesh geometry={geometry} frustumCulled={false}>.
+- MeshModel does not call setDrawRange.
+- MeshBasicMaterial uses DoubleSide.
+- The mesh material enables vertexColors when a color attribute exists.
+
+The success callback could not be observed in the real browser because the current Dashboard was in the no-video state and did not mount ReconstructionViewer. Uploading an existing video mounted the upload state, but clicking Start Reconstruction would mutate/regenerate backend reconstruction artifacts, so it was intentionally not performed.
+
+LIKELY ROOT CAUSE TO VERIFY IN THE BROWSER
+
+The strongest Mesh-only failure candidate is the 32-bit indexed geometry:
+
+- geometry.index.array is Uint32Array because the mesh has 66034 vertices.
+- Three.js can render this in WebGL2.
+- WebGL1 needs the OES_element_index_uint extension.
+- If the current Canvas context is WebGL1 and the extension is absent, the mesh draw can fail or produce a WebGL error while point clouds and line/point modes continue to render because they do not require indexed triangle elements.
+
+This is more specific and testable than blaming the PLY file, vertex colors, normals, camera framing, or drawRange.
+
+REQUIRED RUNTIME CHECKS
+
+These checks were not honestly observable in the current live Dashboard state because Mesh was not mounted without starting a reconstruction:
+
+1. PLYLoader success callback in the browser: NOT OBSERVED. Source callback exists; Node PLYLoader parse succeeds.
+2. Browser geometry.attributes.position.count: Node evidence is 66034.
+3. Browser geometry.index?.count: Node evidence is 129345.
+4. Browser geometry.drawRange: Node evidence is {start: 0, count: Infinity}.
+5. Browser boundingBox: Node evidence is finite and listed above.
+6. Browser boundingSphere: Node evidence is finite and listed above.
+7. <mesh> presence in the live Three.js scene: NOT OBSERVED because the viewer was not mounted.
+8. World position/scale: Source applies the shared Scene transform; the source does not log the resulting world transform.
+9. Index validity: CONFIRMED valid by the Node PLYLoader probe.
+10. Vertex color format: CONFIRMED normalized Uint8Array RGB and compatible with Three.js vertex colors.
+11. Bright material without vertexColors: NOT TESTED in browser.
+12. Wireframe rendering: NOT TESTED in browser.
+13. BoxGeometry in Mesh mode: NOT TESTED in browser.
+14. WebGL error after browser PLY load: NOT OBSERVED because Mesh was not mounted.
+
+SOURCE LIFECYCLE RISKS, LIMITED TO MESH RENDERING
+
+1. MeshModel is kept mounted even when visible is false. Scene always renders <MeshModel visible={mode === "mesh"} />. This allows MeshModel state and a prior loaded geometry to survive mode changes.
+
+2. The loader effect depends on geometry:
+
+[visible, geometry, onSceneTransform]
+
+The effect sets geometry itself, so geometry does not belong in the request effect dependency list. requestedRef currently prevents most duplicate loads, but this is unnecessarily coupled.
+
+3. The PLYLoader request is not invalidated on unmount. A late success callback can call onSceneTransform and setGeometry after the user has switched away.
+
+4. MeshModel and PointCloud both call the same onSceneTransform callback. PointCloud is also mounted while hidden and can asynchronously overwrite the shared parent transform after MeshModel computes its transform.
+
+5. The shared Scene transform is stored at lines 768-791 and applied to the common group at lines 833-844. There is no Mesh-specific transform state.
+
+6. Because the point-cloud and mesh bounds are close, the transform race is not proven to be the reason for total mesh invisibility, but it is a real Mesh rendering risk and can produce stale framing.
+
+MATERIAL CHECK
+
+Current MeshModel material:
+
+<meshBasicMaterial
+  vertexColors={hasColors}
+  color={hasColors ? undefined : "#94a3b8"}
+  side={THREE.DoubleSide}
+/>
+
+The material is theoretically valid:
+- MeshBasicMaterial does not require normals.
+- DoubleSide avoids back-face culling.
+- normalized Uint8Array colors are valid vertex-color input.
+- color being undefined with vertexColors enabled should leave the material base color at its default.
+
+A plain bright material without vertexColors and a wireframe material were not tested in the browser because Mesh could not be mounted without starting a reconstruction. They should be used only as diagnostic toggles, not assumed fixes.
+
+BOX GEOMETRY CHECK
+
+Not tested in the browser. A BoxGeometry test would distinguish a Canvas/material insertion failure from a PLY/index failure:
+- Box visible: failure is specific to PLY geometry/index/WebGL upload.
+- Box invisible: failure is Mesh insertion, Canvas render, camera, or parent transform.
+
+WEBGL CHECK
+
+Not observed in the mounted app because the viewer was unavailable in the current Dashboard state.
+
+When Mesh is mounted, inspect:
+
+const gl = renderer.getContext();
+console.log(gl.getParameter(gl.VERSION));
+console.log(gl.getParameter(gl.MAX_ELEMENTS_INDICES));
+console.log(renderer.capabilities.isWebGL2);
+console.log(renderer.extensions.has('OES_element_index_uint'));
+
+Also watch for INVALID_ENUM, INVALID_OPERATION, or buffer/index upload errors immediately after the PLYLoader success callback.
+
+MINIMAL FIX DIRECTION FOR THE NEXT DEVELOPER
+
+Do not refactor PointCloud, ConfidenceMap, CameraTrajectory, or the whole Scene.
+
+First verify the WebGL2/Uint32 index condition. If the context lacks 32-bit element-index support, the smallest Mesh-only fix should address only MeshModel geometry compatibility or the Canvas context, while preserving the existing PLY URL and working modes. Avoid toNonIndexed() unless memory impact is measured, because it expands a 66k-vertex indexed mesh and may recreate the browser crash.
+
+Independently make MeshModel's loader callback cancellation-safe and prevent late MeshModel callbacks from mutating the shared transform after Mesh has been hidden. This is a MeshModel-only lifecycle correction.
+
+Do not change PointCloud or ConfidenceMap drawRange behavior.
+
+EXACT LINES CHANGED
+
+ReconstructionViewer.jsx: no lines changed.
+
+Only errors.txt was written.
+
+FINAL ROOT-CAUSE STATUS
+
+Confirmed:
+- Mesh URL and backend response are correct.
+- PLYLoader parses valid indexed geometry.
+- Position count, index count, index validity, draw range, bounds, colors, and normals are valid in the Node Three.js probe.
+- Current MeshModel does not suppress geometry with drawRange.
+- Mesh and point-cloud bounds are nearly identical.
+
+Most likely browser-specific cause:
+- The mesh uses a Uint32Array index because it has 66034 vertices, and the active WebGL context may not support 32-bit indexed triangle rendering.
+
+Additional confirmed source risk:
+- MeshModel remains mounted while hidden and shares an asynchronously overwritten parent transform with PointCloud.
+
+Not proven because the live Dashboard did not mount Mesh without starting a new reconstruction:
+- Browser success callback execution.
+- Actual Three.js scene membership.
+- Actual world transform.
+- Browser material-only, wireframe, BoxGeometry, and WebGL error tests.
+
+ReconstructionViewer.jsx was not modified.
