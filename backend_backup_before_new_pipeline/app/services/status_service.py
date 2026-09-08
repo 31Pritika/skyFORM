@@ -631,10 +631,16 @@ def get_reconstruction_status(
         / "reconstruction"
     )
 
-    active_id = find_active_video_id(base_dir)
-    job_dir = output_dir / "jobs" / active_id if active_id else output_dir / "jobs" / "unavailable"
-    keyframe_dir = job_dir / "frames"
-    depth_dir = job_dir / "colmap_mast3r_fusion" / "depth_maps"
+    keyframe_dir = (
+        output_dir
+        / "keyframes"
+        / "new_test"
+    )
+
+    depth_dir = (
+        output_dir
+        / "depth_maps"
+    )
 
     fused_cloud = (
         reconstruction_dir
@@ -813,6 +819,7 @@ def get_reconstruction_status(
 
         "reconstruction": (
             dense_ready
+            and mesh_ready
         ),
 
         "geospatial_alignment":
@@ -826,7 +833,10 @@ def get_reconstruction_status(
     return {
         "status": (
             "ready"
-            if dense_ready
+            if (
+                dense_ready
+                and mesh_ready
+            )
             else "processing"
         ),
 

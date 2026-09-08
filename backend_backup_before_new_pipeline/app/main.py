@@ -24,8 +24,6 @@ from typing import Optional
 from pathlib import Path
 import shutil
 import uuid
-import json
-import zipfile
 
 from app.services.video_service import (
     analyze_video,
@@ -371,14 +369,6 @@ def reconstruction_quality():
 
 @app.get("/api/reconstruction/export")
 def export_reconstruction():
-    state = get_pipeline_state(BASE_DIR)
-    if state.get("status") == "running":
-        raise HTTPException(status_code=409, detail="Wait for reconstruction to complete before exporting.")
-    video_id = state.get("video_id")
-    if video_id:
-        archive = BASE_DIR / "outputs" / "jobs" / video_id / "final" / "skyform_results.zip"
-        if archive.exists() and state.get("status") == "completed":
-            return FileResponse(str(archive), media_type="application/zip", filename="SkyFORM_Reconstruction.zip")
 
     reconstruction_status_data = (
         get_reconstruction_status(
@@ -615,10 +605,6 @@ async def upload_geospatial_data(
 def align_reconstruction_to_gps(
     video_id: str,
 ):
-    state = get_pipeline_state(BASE_DIR)
-    if state.get("video_id") != video_id or state.get("status") != "completed":
-        raise HTTPException(status_code=409, detail="Complete the selected video's reconstruction before alignment.")
-
     matching_videos = list(
         UPLOAD_DIR.glob(
             f"{video_id}.*"
@@ -898,37 +884,3 @@ async def upload_video(
             status_code=500,
             detail=str(error),
         )
-
-class CheckpointPayload(BaseModel):
-    source_points: list
-    measured_points: list
-    independent_of_alignment: bool = False
-
-
-@app.post("/api/geospatial/checkpoints/{video_id}")
-def validate_reconstruction_checkpoints(video_id: str, payload: CheckpointPayload):
-    from app.services.job_georeferencing import validate_checkpoints
-    if not payload.independent_of_alignment:
-        raise HTTPException(status_code=400, detail="Accuracy checks must use independent measured points excluded from alignment.")
-    state = get_pipeline_state(BASE_DIR)
-    if state.get("video_id") != video_id or state.get("status") != "completed":
-        raise HTTPException(status_code=409, detail="Select a completed reconstruction first.")
-    final = OUTPUT_DIR / "jobs" / video_id / "final"
-    path = final / "georeferencing.json"
-    if not path.exists():
-        raise HTTPException(status_code=400, detail="Metric alignment is required before checking metre accuracy.")
-    try:
-        result = validate_checkpoints(payload.source_points, payload.measured_points, json.loads(path.read_text()))
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
-    result["independence"] = "Declared by the user; not independently audited"
-    (final / "checkpoint_validation.json").write_text(json.dumps(result, indent=2))
-    report_path = final / "pipeline_report.json"
-    if report_path.exists():
-        report = json.loads(report_path.read_text())
-        report["checkpoint_validation"] = result
-        report_path.write_text(json.dumps(report, indent=2))
-    with zipfile.ZipFile(final / "skyform_results.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-        for artifact in sorted(final.iterdir()):
-            if artifact.is_file() and artifact.suffix != ".zip": archive.write(artifact, artifact.name)
-    return result

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useCallback,
   useState,
 } from "react";
 
@@ -19,6 +20,7 @@ import PipelineStatus from "../components/PipelineStatus";
 import VideoUpload from "../components/VideoUpload";
 import ReconstructionViewer from "../components/ReconstructionViewer";
 import TelemetryUpload from "../components/TelemetryUpload";
+import RequirementsStatus from "../components/RequirementsStatus";
 
 import {
   uploadVideo,
@@ -72,7 +74,7 @@ function Dashboard() {
   const [
     newProjectMode,
     setNewProjectMode,
-  ] = useState(true);
+  ] = useState(false);
 
   const [
     currentRunStarted,
@@ -164,53 +166,24 @@ function Dashboard() {
     };
 
 
-  const loadInputReadiness =
-    async () => {
-      try {
-        if (!videoData?.id) {
-          setGeospatialStatus(null);
-          setFlightMetadataStatus(null);
-          return;
-        }
-
-        const [
-          geo,
-          flight,
-        ] = await Promise.all([
-          getGeospatialStatus(
-            videoData.id
-          ),
-          getFlightMetadataStatus(
-            videoData.id
-          ),
-        ]);
-
+  const loadInputReadiness = useCallback(() => {
+    const id = videoData?.id || (!newProjectMode && reconstruction?.video_id);
+    if (!id) return Promise.resolve();
+    return Promise.all([getGeospatialStatus(id), getFlightMetadataStatus(id)])
+      .then(([geo, flight]) => {
         setGeospatialStatus(geo);
         setFlightMetadataStatus(flight);
-
-        if (
-          flight?.available &&
-          flight?.metadata
-        ) {
-          setFlightMetadata(
-            (previous) => ({
-              ...previous,
-              ...flight.metadata,
-            })
-          );
+        if (flight?.available && flight.metadata) {
+          setFlightMetadata((previous) => ({ ...previous, ...flight.metadata }));
         }
-      } catch (error) {
-        console.error(
-          "Could not load input readiness:",
-          error
-        );
-      }
-    };
+      }).catch(console.error);
+  }, [videoData, newProjectMode, reconstruction?.video_id]);
+
 
 
   useEffect(() => {
-    loadReconstructionStatus();
-    loadPipelineStatus();
+    getReconstructionStatus().then(setReconstruction).catch(console.error);
+    getPipelineExecutionStatus().then(setPipelineExecution).catch(console.error);
     loadInputReadiness();
 
     const readinessInterval =
@@ -223,7 +196,7 @@ function Dashboard() {
       clearInterval(
         readinessInterval
       );
-  }, [videoData?.id]);
+  }, [loadInputReadiness]);
 
 
   // =========================================================
@@ -495,7 +468,6 @@ function Dashboard() {
 
 
   const pipelineRunning =
-    currentRunStarted &&
     pipelineExecution?.status ===
       "running";
 
@@ -542,7 +514,7 @@ function Dashboard() {
   return (
     <div className="app-shell">
 
-      <Sidebar />
+      <Sidebar exportUrl={reconstructionReady && !pipelineRunning ? "http://127.0.0.1:8000/api/reconstruction/export" : null} />
 
 
       <main className="main-content">
@@ -693,11 +665,12 @@ function Dashboard() {
             >
 
               {reconstructionReady && (
-                <ReconstructionViewer />
+                <ReconstructionViewer key={reconstruction.video_id} jobId={reconstruction.video_id} />
                 )}
 
 
               {!videoData &&
+                !pipelineRunning &&
                 !reconstructionReady && (
 
                   <div
@@ -837,8 +810,7 @@ function Dashboard() {
                 )}
 
 
-              {videoData &&
-                pipelineRunning && (
+              {pipelineRunning && (
 
                   <div
                     className="reconstruction-progress-overlay"
@@ -1722,6 +1694,8 @@ function Dashboard() {
         </section>
 
 
+        {reconstructionReady && <RequirementsStatus key={reconstruction.video_id} jobId={reconstruction.video_id} />}
+
         {/* CAPABILITIES */}
 
         <section
@@ -1732,7 +1706,8 @@ function Dashboard() {
             className="capability-item"
           >
             <TelemetryUpload
-              videoId={videoData?.id}
+              key={videoData?.id || (!newProjectMode && reconstruction?.video_id) || "no-video"}
+              videoId={videoData?.id || (!newProjectMode && reconstruction?.video_id)}
             />
           </div>
 

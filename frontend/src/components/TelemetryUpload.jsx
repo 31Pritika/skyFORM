@@ -13,6 +13,7 @@ import {
 import {
   getGeospatialStatus,
   uploadTelemetry,
+  alignReconstructionToGps,
 } from "../api/videoApi";
 
 
@@ -56,11 +57,14 @@ export default function TelemetryUpload({
 
 
   useEffect(() => {
-    setStatus(null);
-    setError("");
-
-    loadStatus();
+    if (!videoId) return;
+    let active = true;
+    getGeospatialStatus(videoId).then((data) => {
+      if (active) setStatus(data);
+    }).catch(() => { if (active) setStatus(null); });
+    return () => { active = false; };
   }, [videoId]);
+
 
 
   const handleFile = async (
@@ -108,6 +112,14 @@ export default function TelemetryUpload({
     }
   };
 
+
+  const [aligning, setAligning] = useState(false);
+  const align = async () => {
+    setAligning(true); setError("");
+    try { await alignReconstructionToGps(videoId); await loadStatus(); }
+    catch (error) { setError(error.response?.data?.detail || "Alignment failed"); }
+    finally { setAligning(false); }
+  };
 
   const ready =
     Boolean(
@@ -188,6 +200,8 @@ export default function TelemetryUpload({
         </>
       )}
 
+
+      {ready && !aligned && <button className="telemetry-button" disabled={aligning} onClick={align}>{aligning ? "Aligning…" : "Align to GPS"}</button>}
 
       {error && (
         <span className="telemetry-error">
