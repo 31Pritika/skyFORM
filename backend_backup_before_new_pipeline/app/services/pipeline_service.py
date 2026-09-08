@@ -59,10 +59,16 @@ def _write_state(
         exist_ok=True,
     )
 
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    temporary.replace(path)
-
+    with open(
+        path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            state,
+            file,
+            indent=2,
+        )
 
 
 def get_pipeline_state(

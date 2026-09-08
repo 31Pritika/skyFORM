@@ -16,7 +16,7 @@ const navigation = [
   { name: "Exports", icon: Download }
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ exportUrl }) {
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -34,9 +34,15 @@ export default function Sidebar() {
         {navigation.map((item) => {
           const Icon = item.icon;
 
+          if (item.name === "Exports" && exportUrl) {
+            return <a key={item.name} className="nav-item" href={exportUrl} download>
+              <Icon size={17} strokeWidth={1.7} /><span>Exports</span>
+            </a>;
+          }
           return (
             <button
               key={item.name}
+              disabled={item.name === "Exports" && !exportUrl}
               className={`nav-item ${item.active ? "active" : ""}`}
             >
               <Icon size={17} strokeWidth={1.7} />

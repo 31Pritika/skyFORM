@@ -21,13 +21,3 @@ uvicorn==0.39.0
 uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
-
-# Reconstruction runtime (also requires the vendored MASt3R requirements).
-laspy==2.6.1
-open3d>=0.18
-trimesh>=4
-scipy>=1.10
-scikit-image>=0.21
-rasterio==1.4.3
-pyproj==3.6.1
-reportlab>=4

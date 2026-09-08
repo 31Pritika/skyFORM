@@ -1,124 +1,92 @@
 # SkyFORM
 
-SkyFORM converts a single-pass drone video into a reconstructed 3D scene using computer vision and AI.
+SkyFORM turns drone video into a 3D reconstruction.
 
-The system performs frame selection, dynamic-object filtering, camera reconstruction, monocular depth estimation, multi-view fusion, point-cloud generation, mesh reconstruction, reconstruction-quality analysis, visualization, and 3D model export.
+It can create:
 
-## Tech Stack
+- A camera path
+- A point cloud
+- A 3D mesh
+- Quality and confidence information
+- Export files such as PLY, OBJ, GLB, LAS, GeoTIFF, and FBX
 
-### Backend
-- Python
-- FastAPI
-- OpenCV
-- PyTorch
-- Depth Anything V2
-- YOLOv8
-- COLMAP
-- Open3D
+The project has:
 
-### Frontend
-- React
-- Vite
-- Three.js
-- React Three Fiber
+- A Python/FastAPI backend for video processing
+- A React/Vite frontend for the web interface
 
----
+## Before You Start
 
-# Running SkyFORM
+You need:
 
-## Requirements
-
-Install:
-
-- Python 3
-- Node.js + npm
-- COLMAP
+- macOS or Linux
+- Python 3.9 or newer
+- Node.js 18 or newer
 - Git
+- FFmpeg, including `ffprobe`
+- COLMAP
+- Assimp for FBX export
 
-On macOS, Homebrew can be used to install the required system packages.
+### Install system tools on macOS
 
----
-
-## 1. Clone the repository
+Install Homebrew from [brew.sh](https://brew.sh) if it is not already installed. Then run:
 
 ```bash
-git clone <YOUR-GITHUB-REPOSITORY-URL>
+brew install ffmpeg colmap assimp
+```
+
+Check that the tools are available:
+
+```bash
+python3 --version
+node --version
+ffprobe -version
+colmap -h
+assimp version
+```
+
+## Download SkyFORM
+
+```bash
+git clone https://github.com/joel1701/skyFORM.git
 cd skyFORM
 ```
 
----
+## Start the Backend
 
-## 2. Backend Setup
-
-Go to the backend:
+Open a terminal in the project folder and run:
 
 ```bash
 cd backend
-```
-
-Create a Python virtual environment:
-
-```bash
 python3 -m venv venv
-```
-
-Activate it.
-
-### macOS / Linux
-
-```bash
 source venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r external/mast3r/requirements.txt
 ```
 
-### Windows
+Start the API:
 
 ```bash
-venv\Scripts\activate
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Install the required Python packages:
+Keep this terminal open.
 
-```bash
-pip install -r requirements.txt
-```
+Test the backend in a browser:
 
-Start the backend:
+- Health check: <http://127.0.0.1:8000/health>
+- API documentation: <http://127.0.0.1:8000/docs>
 
-### macOS / Linux
-
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uvicorn app.main:app --port 8000
-```
-
-### Windows
-
-```bash
-uvicorn app.main:app --port 8000
-```
-
-The API should now be available at:
-
-```text
-http://127.0.0.1:8000
-```
-
-Test it by opening:
-
-```text
-http://127.0.0.1:8000/health
-```
-
-You should receive:
+The health check should return:
 
 ```json
 {"status":"healthy"}
 ```
 
----
+## Start the Frontend
 
-## 3. Frontend Setup
-
-Open another terminal:
+Open a second terminal in the project folder:
 
 ```bash
 cd frontend
@@ -126,128 +94,157 @@ npm install
 npm run dev
 ```
 
-Open the URL shown by Vite, normally:
+Open the URL printed by Vite, usually:
+
+<http://localhost:5173>
+
+The frontend expects the backend to be running at `http://127.0.0.1:8000`.
+
+## Current Frontend Note
+
+The current frontend entry point imports a stylesheet that is not yet in the repository:
 
 ```text
-http://localhost:5173
+frontend/src/portal/portal.css
 ```
 
----
+Because of this, `npm run build` currently fails until that stylesheet is restored or the import in `frontend/src/App.jsx` is updated. The backend can still be started and tested through the API documentation at <http://127.0.0.1:8000/docs>.
 
-# Using SkyFORM
+## Use the API
 
-1. Upload a drone or moving-camera video.
-2. Optionally provide GPS/flight metadata.
-3. Start reconstruction.
-4. Wait for the reconstruction pipeline to complete.
-5. Explore the generated:
-   - 3D Point Cloud
-   - 3D Mesh
-   - Confidence / Quality Map
-   - Camera Path
-6. Download the reconstructed model.
+The easiest way to explore the backend is the interactive API page:
 
-Current export formats include:
+<http://127.0.0.1:8000/docs>
 
-- PLY
-- OBJ
-- GLB
+The main workflow is:
 
-## Input Data Contract
+1. Upload a video.
+2. Add flight or GPS metadata if available.
+3. Start a reconstruction job.
+4. Check the job status while it runs.
+5. View the camera path, point cloud, mesh, and quality results.
+6. Download the exported files.
 
-| Input | Required fields | Purpose |
-| --- | --- | --- |
-| Drone video | 1080p or 4K video, readable frame rate, one continuous pass | Source imagery for keyframe selection, pose recovery, depth, and appearance |
-| GPS coordinates | Latitude, longitude, and preferably altitude for timestamped samples | Geospatial alignment and metric positioning |
-| Flight metadata | Frame or timestamp correspondence to the video; camera model or intrinsics when available | Match camera poses to telemetry and reduce scale or calibration uncertainty |
-| IMU data | Optional orientation and acceleration samples with timestamps | Improve pose priors during blur or low-texture sections |
-| Barometric altitude | Optional timestamped altitude samples | Improve vertical scale and altitude consistency |
-| Camera intrinsics | Optional focal length, principal point, and distortion parameters | Improve camera calibration when video metadata is incomplete |
-| RTK/PPK corrections | Optional corrected positions and quality indicators | Improve geospatial accuracy beyond ordinary GPS |
+The API stores temporary input files in:
 
-GPS telemetry is currently uploaded as CSV with `latitude` and `longitude` columns. `altitude` and `timestamp` are supported; timestamped telemetry is required for the alignment path, which also requires at least three valid timestamped samples.
+```text
+backend/uploads/
+```
 
-## Desired Output
+Generated results are stored in:
 
-For each uploaded single-pass flight, SkyFORM should produce a validated scene package. The package must identify whether the geometry is relative or georeferenced and must not present an unscaled reconstruction as metrically accurate.
+```text
+backend/outputs/
+```
 
-| Output | Required content | Intended use |
-| --- | --- | --- |
-| 3D terrain and structures | Dense colored point cloud and/or triangle mesh covering visible ground, buildings, and infrastructure | Visualization, spatial inspection, and downstream analysis |
-| Building facades and rooftops | Reconstructed surfaces from the available viewing angles, with explicit gaps where surfaces are occluded | Building inspection and damage assessment |
-| Roads and infrastructure | Visible roads, bridges, towers, utilities, and other man-made structures represented in the scene coordinate system | Mapping, planning, and asset inspection |
-| Vegetation and obstacles | Visible vegetation and detected dynamic-object masks or exclusions | Situational awareness and obstacle analysis |
-| Textured or colored model | Vertex-colored PLY plus exported OBJ/GLB when mesh conversion succeeds | Interactive viewing and external 3D tools |
-| Camera trajectory | Recovered camera poses and flight-path visualization | Coverage review and reconstruction diagnostics |
-| Confidence data | Per-point confidence derived from reprojection error and feature-track length, with aggregate quality metrics | Measurement risk assessment and quality filtering |
-| Coordinate metadata | Coordinate system, GPS availability, alignment status, source telemetry summary, and scale limitations | Correct interpretation of measurements |
+These folders are local runtime data and are intentionally ignored by Git.
 
-### Coordinate Accuracy Contract
+## Run the Tests
 
-- Without usable GPS, timestamped flight metadata, RTK/PPK, known scale, or ground control, output geometry is relative and must be labeled `relative_unscaled`.
-- With valid telemetry and successful alignment, output geometry is exported in a local ENU frame anchored to the reference GPS point and must report alignment status and residual error.
-- A single flight path cannot guarantee reconstruction of surfaces that were never observed. Occluded or weakly supported areas must be treated as incomplete rather than fabricated.
+With the backend virtual environment activated:
 
-## Evaluation Criteria
+```bash
+cd backend
+python -m pytest
+```
 
-Evaluation should use held-out scenes with surveyed checkpoints, or independently measured distances where survey data is unavailable. Results should be reported separately for relative reconstruction and georeferenced reconstruction.
+Run the frontend checks from another terminal:
 
-| Criterion | Measurement | Target / acceptance rule |
-| --- | --- | --- |
-| Reconstruction completion | Pipeline reaches mesh and quality-analysis stages without manual intervention | At least 90% of valid test videos complete; failures identify the stage and cause |
-| Frame usability | Number of selected keyframes, blur rejection, and usable-frame ratio | At least 5 usable keyframes; no run proceeds while the usable set is empty |
-| Camera recovery | Registered-image ratio and COLMAP reprojection error | At least 60% of selected keyframes registered; mean reprojection error below 2 px where reported |
-| Geospatial alignment | Checkpoint horizontal and vertical error against surveyed coordinates | Report RMSE and maximum error; target RMSE <= 5 m with ordinary GPS, <= 1 m with RTK/PPK |
-| Metric scale | Error in independently measured distances, heights, or areas | Relative-only runs report no metric claim; georeferenced runs target <= 5% distance error |
-| Geometry completeness | Percentage of annotated visible surfaces represented by points or mesh faces | At least 70% for the visible evaluation region; report facade, rooftop, terrain, and infrastructure separately |
-| Geometry quality | Invalid points, empty mesh checks, triangle count, and connected components | No empty primary artifact; no NaN/inf coordinates; invalid geometry count is zero |
-| Dynamic-object handling | Precision and recall of masks for vehicles, people, animals, and other moving objects | Report per-class precision/recall; target mask precision >= 0.80 on the evaluation set |
-| Appearance quality | Texture or vertex-color coverage and visual review under varied illumination | At least 95% of exported vertices have valid color data; no severe color corruption |
-| Confidence usefulness | Correlation between confidence bands and measured geometric error | Higher-confidence points must have lower median error than lower-confidence points |
-| Processing time | Wall-clock time from upload to available outputs, measured by hardware profile | Report median and p90 separately for CPU and GPU; define near-real-time as <= 2x video duration for preview output |
-| Export interoperability | Open exported PLY, OBJ, and GLB files in independent viewers | Every claimed format opens and contains non-empty geometry with preserved colors where supported |
+```bash
+cd frontend
+npm run lint
+npm run build
+```
 
-### Evaluation Dataset
+The frontend build will continue to report the missing `portal.css` file until the current frontend issue is fixed.
 
-The acceptance set should include buildings, roads, terrain, vegetation, and dynamic objects captured at 1080p or 4K from a single moving-UAV pass. It should contain varied lighting, shadows, compression levels, motion blur, and GPS quality. Each scene should record video duration, frame rate, camera intrinsics when available, GPS/IMU/barometric metadata, RTK/PPK availability, surveyed checkpoints, and ground-truth distances or a reference model.
+## Reconstruction Pipeline
 
----
-
-# Reconstruction Pipeline
+SkyFORM processes a video in stages:
 
 ```text
 Video
-  ↓
-Frame Selection
-  ↓
-YOLO Dynamic Object Filtering
-  ↓
-COLMAP Camera Reconstruction
-  ↓
-Depth Anything V2
-  ↓
-Multi-View Fusion
-  ↓
-Point Cloud Cleaning
-  ↓
-3D Point Cloud
-  ↓
-Mesh Generation
-  ↓
-Quality Analysis
-  ↓
-Interactive 3D Viewer + Export
+  -> Video information and frame extraction
+  -> Dynamic-object filtering
+  -> COLMAP camera reconstruction
+  -> MASt3R depth and multi-view fusion
+  -> Point-cloud cleanup
+  -> Mesh generation
+  -> Quality analysis
+  -> Export files
 ```
 
----
+The default frame limit is 300 frames. To change it:
 
-# Notes
+```bash
+SKYFORM_MAX_FRAMES=600 uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-- The first run may download the required AI models.
-- An internet connection may therefore be required for initial model setup.
-- GPU acceleration is used when supported; SkyFORM can also run on CPU.
-- COLMAP must be installed separately and accessible from the terminal.
-- Without GPS/GCP/known scale information, the reconstruction uses a relative coordinate system.
-- GPS-enabled metric/geospatial reconstruction requires suitable timestamped telemetry.
+More frames can improve coverage but will increase processing time and memory use.
 
-If setup fails on your operating system, provide this README and the error message to an LLM or debugging assistant for OS-specific installation instructions.
+## GPS and Scale
+
+Without GPS, ground-control points, or another known scale reference, the reconstruction uses relative coordinates. It should not be interpreted as a metric survey.
+
+GPS-based alignment requires usable timestamped flight telemetry. Independent checkpoints are required when checking reconstruction accuracy.
+
+## Troubleshooting
+
+### `uvicorn: command not found`
+
+Activate the backend virtual environment and install the requirements again:
+
+```bash
+cd backend
+source venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+### `ffprobe: command not found`
+
+Install FFmpeg:
+
+```bash
+brew install ffmpeg
+```
+
+### `colmap: command not found`
+
+Install COLMAP:
+
+```bash
+brew install colmap
+```
+
+### The frontend cannot connect to the backend
+
+Make sure both terminals are running and open:
+
+- Frontend: <http://localhost:5173>
+- Backend: <http://127.0.0.1:8000/health>
+
+### A reconstruction is slow or runs out of memory
+
+Use a shorter video or reduce the frame limit:
+
+```bash
+SKYFORM_MAX_FRAMES=150 uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+GPU acceleration is used when the installed PyTorch environment supports it. CPU processing is also supported but is slower.
+
+## Project Folders
+
+```text
+backend/app/                 FastAPI application and services
+backend/new_pipeline/        Standalone reconstruction pipeline scripts
+backend/external/mast3r/     Vendored MASt3R code
+backend/tests/                Backend tests
+backend/uploads/              Local uploaded videos
+backend/outputs/              Local generated results
+frontend/src/                 React application
+```
+
+## License and Third-Party Software
+
+SkyFORM includes or uses third-party computer-vision software. See the license and notice files in `backend/external/mast3r/` before redistributing the project.

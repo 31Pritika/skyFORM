@@ -653,5 +653,262 @@ def georeference_reconstruction(
     video_path,
     gps_data,
 ):
-    from app.services.job_georeferencing import georeference_job
-    return georeference_job(base_dir, Path(video_path).stem, gps_data)
+    base_dir = Path(
+        base_dir
+    )
+
+    video_path = Path(
+        video_path
+    )
+
+    reconstruction_dir = (
+        base_dir
+        / "outputs"
+        / "reconstruction"
+    )
+
+    images_txt = (
+        base_dir
+        / "outputs"
+        / "colmap_new"
+        / "dense"
+        / "sparse_txt"
+        / "images.txt"
+    )
+
+    source_cloud = (
+        reconstruction_dir
+        / "dense_fused.ply"
+    )
+
+    source_mesh = (
+        reconstruction_dir
+        / "mesh.ply"
+    )
+
+    output_cloud = (
+        reconstruction_dir
+        / "dense_fused_georef.ply"
+    )
+
+    output_mesh = (
+        reconstruction_dir
+        / "mesh_georef.ply"
+    )
+
+    video_id = video_path.stem
+
+    telemetry_dir = (
+        base_dir
+        / "outputs"
+        / "telemetry"
+        / video_id
+    )
+
+    telemetry_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    transform_path = (
+        telemetry_dir
+        / "geospatial_transform.json"
+    )
+
+    cameras = (
+        read_colmap_camera_centers(
+            images_txt
+        )
+    )
+
+    fps = get_video_fps(
+        video_path
+    )
+
+    gps_points = (
+        gps_data[
+            "points"
+        ]
+    )
+
+    if len(gps_points) < 3:
+        raise RuntimeError(
+            "At least 3 GPS telemetry "
+            "samples are required."
+        )
+
+    reference = (
+        gps_points[0]
+    )
+
+    reference_latitude = float(
+        reference[
+            "latitude"
+        ]
+    )
+
+    reference_longitude = float(
+        reference[
+            "longitude"
+        ]
+    )
+
+    reference_altitude = float(
+        reference.get(
+            "altitude",
+            0.0,
+        )
+    )
+
+    matches = (
+        match_cameras_to_gps(
+            cameras,
+            gps_points,
+            fps,
+        )
+    )
+
+    if len(matches) < 3:
+        raise RuntimeError(
+            "Not enough camera/GPS "
+            "timestamp matches."
+        )
+
+    sfm_points = []
+
+    enu_points = []
+
+    for match in matches:
+        gps = match["gps"]
+
+        enu = gps_to_local_enu(
+            float(
+                gps["latitude"]
+            ),
+            float(
+                gps["longitude"]
+            ),
+            float(
+                gps.get(
+                    "altitude",
+                    reference_altitude,
+                )
+            ),
+            reference_latitude,
+            reference_longitude,
+            reference_altitude,
+        )
+
+        sfm_points.append(
+            match[
+                "sfm_position"
+            ]
+        )
+
+        enu_points.append(
+            enu
+        )
+
+    transform = (
+        estimate_similarity_transform(
+            sfm_points,
+            enu_points,
+        )
+    )
+
+    scale = (
+        transform[
+            "scale"
+        ]
+    )
+
+    rotation = (
+        transform[
+            "rotation"
+        ]
+    )
+
+    translation = (
+        transform[
+            "translation"
+        ]
+    )
+
+    transform_point_cloud(
+        source_cloud,
+        output_cloud,
+        scale,
+        rotation,
+        translation,
+    )
+
+    transform_mesh(
+        source_mesh,
+        output_mesh,
+        scale,
+        rotation,
+        translation,
+    )
+
+    result = {
+        "coordinate_system":
+            "local_enu_meters",
+
+        "reference": {
+            "latitude":
+                reference_latitude,
+
+            "longitude":
+                reference_longitude,
+
+            "altitude":
+                reference_altitude,
+        },
+
+        "matched_cameras":
+            len(matches),
+
+        "scale":
+            scale,
+
+        "alignment_rmse_m":
+            transform[
+                "rmse_m"
+            ],
+
+        "alignment_median_error_m":
+            transform[
+                "median_error_m"
+            ],
+
+        "rotation":
+            rotation.tolist(),
+
+        "translation":
+            translation.tolist(),
+
+        "outputs": {
+            "point_cloud":
+                str(
+                    output_cloud
+                ),
+
+            "mesh":
+                str(
+                    output_mesh
+                ),
+        },
+    }
+
+    with open(
+        transform_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            result,
+            file,
+            indent=2,
+        )
+
+    return result

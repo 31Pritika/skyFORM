@@ -1,32 +1,10 @@
 from pathlib import Path
+import json
+import os
 import shutil
 import subprocess
+import sys
 import traceback
-
-from app.services.frame_service import (
-    select_keyframes,
-    save_selected_keyframes,
-)
-
-from app.services.dynamic_object_service import (
-    mask_dynamic_objects,
-)
-
-from app.services.depth_service import (
-    generate_depth_maps,
-)
-
-from app.services.fusion_service import (
-    fuse_depth_maps,
-)
-
-from app.services.mesh_service import (
-    create_mesh_from_point_cloud,
-)
-
-from app.services.quality_service import (
-    get_quality_metrics,
-)
 
 from app.services.pipeline_service import (
     mark_pipeline_started,
@@ -35,165 +13,65 @@ from app.services.pipeline_service import (
     update_pipeline_state,
 )
 
-from app.services.geospatial_service import (
-    parse_gps_csv,
-    get_gps_path,
-)
 
-from app.services.alignment_service import (
-    georeference_reconstruction,
-)
+def copy_or_link(source, destination):
+    """
+    Prefer a hard link so large uploaded videos are not duplicated.
+    Fall back to a normal copy when linking is unavailable.
+    """
+    source = Path(source)
+    destination = Path(destination)
 
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def run_command(command):
-    print()
-    print("=" * 70)
-    print("RUNNING:")
-    print(" ".join(command))
-    print("=" * 70)
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    print(result.stdout)
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Command failed:\n"
-            + " ".join(command)
-            + "\n\n"
-            + result.stdout
-        )
-
-    return result.stdout
-
-
-def clear_directory(path):
-    path = Path(path)
-
-    if path.exists():
-        shutil.rmtree(path)
-
-    path.mkdir(
+    destination.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    if destination.exists():
+        destination.unlink()
 
-def find_sparse_model(sparse_dir):
-    """
-    Select the valid COLMAP sparse model with the largest number
-    of registered images.
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
 
-    This reads the image count directly from images.bin instead
-    of calling `colmap model_analyzer`, which can crash natively
-    on Apple Silicon.
-    """
-    import struct
 
-    sparse_dir = Path(sparse_dir)
+def copy_if_exists(source, destination):
+    source = Path(source)
+    destination = Path(destination)
 
-    if not sparse_dir.exists():
-        raise RuntimeError(
-            "COLMAP sparse directory does not exist."
-        )
+    if not source.exists():
+        return False
 
-    valid_models = []
-
-    for model_dir in sorted(
-        sparse_dir.iterdir()
-    ):
-        if not model_dir.is_dir():
-            continue
-
-        cameras_file = (
-            model_dir
-            / "cameras.bin"
-        )
-
-        images_file = (
-            model_dir
-            / "images.bin"
-        )
-
-        points_file = (
-            model_dir
-            / "points3D.bin"
-        )
-
-        if not (
-            cameras_file.exists()
-            and images_file.exists()
-            and points_file.exists()
-        ):
-            continue
-
-        try:
-            with open(
-                images_file,
-                "rb",
-            ) as file:
-                header = file.read(8)
-
-            if len(header) != 8:
-                continue
-
-            registered_images = (
-                struct.unpack(
-                    "<Q",
-                    header,
-                )[0]
-            )
-
-            valid_models.append(
-                (
-                    registered_images,
-                    model_dir,
-                )
-            )
-
-        except Exception as error:
-            print(
-                "Sparse model inspection failed:",
-                model_dir,
-                error,
-            )
-
-    if not valid_models:
-        raise RuntimeError(
-            "COLMAP did not generate a valid sparse model."
-        )
-
-    valid_models.sort(
-        key=lambda item: item[0],
-        reverse=True,
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    registered_images, best_model = (
-        valid_models[0]
+    shutil.copy2(
+        source,
+        destination,
     )
 
-    print(
-        "Selected sparse model:",
-        best_model,
-        "| registered images:",
-        registered_images,
-    )
-
-    return best_model
+    return True
 
 
-# ============================================================
-# COMPLETE SKYFORM PIPELINE
-# ============================================================
+def load_json(path):
+    path = Path(path)
+
+    if not path.exists():
+        return {}
+
+    try:
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            return json.load(file)
+    except Exception:
+        return {}
+
 
 def run_reconstruction_pipeline(
     base_dir,
@@ -201,6 +79,7 @@ def run_reconstruction_pipeline(
 ):
     base_dir = Path(base_dir)
     video_path = Path(video_path)
+
     video_id = video_path.stem
 
     if not video_path.exists():
@@ -208,878 +87,394 @@ def run_reconstruction_pipeline(
             f"Video does not exist: {video_path}"
         )
 
+    # =========================================================
+    # JOB PATHS
+    # =========================================================
 
-    # --------------------------------------------------------
-    # OUTPUT PATHS
-    # --------------------------------------------------------
-
-    output_dir = (
+    job_dir = (
         base_dir
         / "outputs"
+        / "jobs"
+        / video_id
     )
 
-    keyframe_dir = (
-        output_dir
-        / "keyframes"
-        / "new_test"
+    input_dir = job_dir / "input"
+    final_dir = job_dir / "final"
+
+    input_dir.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    colmap_keyframe_dir = (
-        output_dir
-        / "keyframes"
-        / "colmap_input"
+    # Start every reconstruction from a clean job workspace.
+    # Keep the input directory we just created.
+    for child in list(job_dir.iterdir()):
+        if child == input_dir:
+            continue
+
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+    # Remove stale input from a previous run of this same ID.
+    for old_input in input_dir.iterdir():
+        if old_input.is_file():
+            old_input.unlink()
+
+    job_video = (
+        input_dir
+        / video_path.name
     )
 
-    colmap_dir = (
-        output_dir
-        / "colmap_new"
+    copy_or_link(
+        video_path,
+        job_video,
     )
 
-    sparse_dir = (
-        colmap_dir
-        / "sparse"
+    # =========================================================
+    # OPTIONAL TELEMETRY BRIDGE
+    # =========================================================
+
+    # Existing frontend/API stores telemetry here:
+    legacy_gps = (
+        base_dir
+        / "outputs"
+        / "telemetry"
+        / video_id
+        / "gps.csv"
     )
 
-    dense_dir = (
-        colmap_dir
-        / "dense"
-    )
+    if legacy_gps.exists():
+        shutil.copy2(
+            legacy_gps,
+            input_dir / "telemetry.csv",
+        )
 
-    dense_image_dir = (
-        dense_dir
-        / "images"
-    )
-
-    dense_sparse_txt_dir = (
-        dense_dir
-        / "sparse_txt"
-    )
-
-    depth_dir = (
-        output_dir
-        / "depth_maps"
-    )
+    # =========================================================
+    # LEGACY VIEWER PATHS
+    # =========================================================
 
     reconstruction_dir = (
-        output_dir
+        base_dir
+        / "outputs"
         / "reconstruction"
     )
 
-    fused_cloud_path = (
+    reconstruction_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    legacy_cloud = (
         reconstruction_dir
         / "dense_fused.ply"
     )
 
-    mesh_path = (
+    legacy_mesh = (
         reconstruction_dir
         / "mesh.ply"
     )
 
-    georef_cloud_path = (
-        reconstruction_dir
-        / "dense_fused_georef.ply"
-    )
+    # Never display an older reconstruction while a new one runs.
+    for stale in (
+        legacy_cloud,
+        legacy_mesh,
+    ):
+        if stale.exists():
+            stale.unlink()
 
-    georef_mesh_path = (
-        reconstruction_dir
-        / "mesh_georef.ply"
-    )
-
-    georef_transform_path = (
-    output_dir
-    / "telemetry"
-    / video_id
-    / "geospatial_transform.json"
-)
-
-
-    # ========================================================
-    # START PIPELINE
-    # ========================================================
+    # =========================================================
+    # PIPELINE START
+    # =========================================================
 
     mark_pipeline_started(
-    base_dir,
-    video_id=video_id,
-)
-
-    # Never allow geospatial artifacts from an older
-    # reconstruction to be mistaken for the current run.
-    for stale_path in (
-        georef_cloud_path,
-        georef_mesh_path,
-        georef_transform_path,
-    ):
-        if stale_path.exists():
-            stale_path.unlink()
+        base_dir,
+        video_id=video_id,
+    )
 
     try:
-
-        # ====================================================
-        # STAGE 1
-        # FRAME INTELLIGENCE
-        # ====================================================
-
         update_pipeline_state(
             base_dir,
             progress=5,
             current_stage="frame_intelligence",
             message=(
-                "Analyzing video and selecting "
-                "reconstruction keyframes."
+                "Preparing video and extracting "
+                "reconstruction frames."
             ),
             stage="frame_intelligence",
             stage_status="running",
         )
 
-        clear_directory(
-            keyframe_dir
+        runner = (
+            base_dir
+            / "new_pipeline"
+            / "scripts"
+            / "run_pipeline.py"
         )
 
-
-        # First try stronger quality filtering.
-        keyframe_result = (
-            select_keyframes(
-                str(video_path),
-                sample_interval=5,
-                sharpness_threshold=80.0,
-                difference_threshold=18.0,
-            )
-        )
-
-
-        # If too few frames survive,
-        # automatically relax thresholds.
-        if (
-            keyframe_result[
-                "selected_count"
-            ]
-            < 8
-        ):
-            print(
-                "Too few keyframes selected."
+        if not runner.exists():
+            raise FileNotFoundError(
+                f"New pipeline runner not found: {runner}"
             )
 
-            print(
-                "Retrying with relaxed "
-                "reconstruction thresholds..."
-            )
-
-            keyframe_result = (
-                select_keyframes(
-                    str(video_path),
-                    sample_interval=5,
-                    sharpness_threshold=50.0,
-                    difference_threshold=5.0,
-                )
-            )
-
-
-        selected = (
-            keyframe_result[
-                "keyframes"
-            ]
-        )
-
-
-        if len(selected) < 5:
-            raise RuntimeError(
-                "Not enough usable keyframes "
-                "for reconstruction. "
-                "Capture the object while moving "
-                "around it with more viewpoint change."
-            )
-
-
-        saved_frames = (
-            save_selected_keyframes(
-                str(video_path),
-                selected,
-                str(keyframe_dir),
-            )
-        )
-
-
-        if len(saved_frames) < 5:
-            raise RuntimeError(
-                "Failed to save enough keyframes."
-            )
-
-
-        print(
-            "Selected keyframes:",
-            len(saved_frames),
-        )
-
+        env = os.environ.copy()
+        env["SKYFORM_JOB_ID"] = video_id
+        env["PYTHONUNBUFFERED"] = "1"
 
         update_pipeline_state(
             base_dir,
-            progress=15,
+            progress=10,
             message=(
-                f"{len(saved_frames)} "
-                "keyframes selected."
+                "SkyFORM reconstruction pipeline started."
             ),
-            stage="frame_intelligence",
-            stage_status="completed",
         )
 
+        # -----------------------------------------------------
+        # RUN NEW PIPELINE
+        # -----------------------------------------------------
 
-        # ====================================================
-        # DYNAMIC OBJECT FILTERING
-        # ====================================================
-
-        clear_directory(
-            colmap_keyframe_dir
-        )
-
-        dynamic_result = (
-            mask_dynamic_objects(
-                keyframe_dir,
-                colmap_keyframe_dir,
-            )
-        )
-
-        print(
-            "Dynamic objects detected:",
-            dynamic_result[
-                "dynamic_objects_detected"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(runner),
             ],
-        )
-
-
-        # ====================================================
-        # STAGE 2
-        # COLMAP FEATURE EXTRACTION
-        # ====================================================
-
-        update_pipeline_state(
-            base_dir,
-            progress=20,
-            current_stage="feature_extraction",
-            message=(
-                "Extracting visual features "
-                "with COLMAP."
+            cwd=str(
+                base_dir
+                / "new_pipeline"
+                / "scripts"
             ),
-            stage="feature_extraction",
-            stage_status="running",
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
 
-
-        clear_directory(
-            colmap_dir
-        )
-
-        sparse_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-
-        database_path = (
-            colmap_dir
-            / "database.db"
-        )
-
-
-        run_command([
-            "colmap",
-            "feature_extractor",
-
-            "--database_path",
-            str(database_path),
-
-            "--image_path",
-            str(colmap_keyframe_dir),
-
-            "--ImageReader.single_camera",
-            "1",
-        ])
-
-
-        run_command([
-            "colmap",
-            "sequential_matcher",
-
-            "--database_path",
-            str(database_path),
-        ])
-
-
-        update_pipeline_state(
-            base_dir,
-            progress=32,
-            message=(
-                "Feature extraction and "
-                "matching completed."
-            ),
-            stage="feature_extraction",
-            stage_status="completed",
-        )
-
-
-        # ====================================================
-        # STAGE 3
-        # CAMERA POSES / SPARSE SFM
-        # ====================================================
-
-        update_pipeline_state(
-            base_dir,
-            progress=35,
-            current_stage="camera_reconstruction",
-            message=(
-                "Estimating camera poses "
-                "and sparse 3D geometry."
-            ),
-            stage="camera_reconstruction",
-            stage_status="running",
-        )
-
-
-        run_command([
-            "colmap",
-            "mapper",
-
-            "--database_path",
-            str(database_path),
-
-            "--image_path",
-            str(colmap_keyframe_dir),
-
-            "--output_path",
-            str(sparse_dir),
-        ])
-
-
-        sparse_model = (
-            find_sparse_model(
-                sparse_dir
-            )
-        )
-
-
-        print(
-            "Sparse model:",
-            sparse_model,
-        )
-
-
-        dense_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-
-        # ====================================================
-        # UNDISTORT IMAGES
-        # ====================================================
-
-        run_command([
-            "colmap",
-            "image_undistorter",
-
-            "--image_path",
-            str(keyframe_dir),
-
-            "--input_path",
-            str(sparse_model),
-
-            "--output_path",
-            str(dense_dir),
-
-            "--output_type",
-            "COLMAP",
-        ])
-
-
-        if not dense_image_dir.exists():
-            raise RuntimeError(
-                "COLMAP image undistortion failed."
-            )
-
-
-        # ====================================================
-        # CONVERT COLMAP MODEL TO TXT
-        # ====================================================
-
-        dense_sparse_txt_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-
-        dense_sparse_model = (
-            dense_dir
-            / "sparse"
-        )
-
-
-        run_command([
-            "colmap",
-            "model_converter",
-
-            "--input_path",
-            str(dense_sparse_model),
-
-            "--output_path",
-            str(dense_sparse_txt_dir),
-
-            "--output_type",
-            "TXT",
-        ])
-
-
-        required_files = [
-            dense_sparse_txt_dir
-            / "cameras.txt",
-
-            dense_sparse_txt_dir
-            / "images.txt",
-
-            dense_sparse_txt_dir
-            / "points3D.txt",
-        ]
-
-
-        for required in required_files:
-            if not required.exists():
-                raise RuntimeError(
-                    f"Missing COLMAP file: "
-                    f"{required.name}"
+        if process.stdout is not None:
+            for line in process.stdout:
+                if line.startswith("SKYFORM_STAGE "):
+                    event = json.loads(line.removeprefix("SKYFORM_STAGE "))
+                    stage_map = {1: "frame_intelligence", 2: "frame_intelligence",
+                                 3: "feature_extraction", 4: "camera_reconstruction",
+                                 5: "depth_estimation", 6: "depth_fusion",
+                                 7: "mesh_generation", 8: "quality_analysis",
+                                 9: "quality_analysis", 10: "quality_analysis"}
+                    stage = stage_map[event["index"]]
+                    update_pipeline_state(base_dir, progress=min(88, event["index"] * 8),
+                                          current_stage=stage, stage=stage,
+                                          stage_status=event["status"], message=event["name"])
+                print(
+                    "[SkyFORM]",
+                    line.rstrip(),
+                    flush=True,
                 )
 
+        return_code = process.wait()
 
-        update_pipeline_state(
-            base_dir,
-            progress=48,
-            message=(
-                "Camera poses and sparse "
-                "geometry reconstructed."
-            ),
-            stage="camera_reconstruction",
-            stage_status="completed",
-        )
-
-
-        # ====================================================
-        # STAGE 4
-        # DEPTH ANYTHING V2
-        # ====================================================
-
-        update_pipeline_state(
-            base_dir,
-            progress=52,
-            current_stage="depth_estimation",
-            message=(
-                "Generating AI relative "
-                "depth maps."
-            ),
-            stage="depth_estimation",
-            stage_status="running",
-        )
-
-
-        clear_directory(
-            depth_dir
-        )
-
-
-        depth_results = (
-            generate_depth_maps(
-                dense_image_dir,
-                depth_dir,
-            )
-        )
-
-
-        if not depth_results:
+        if return_code != 0:
             raise RuntimeError(
-                "Depth estimation produced "
-                "no depth maps."
+                "New SkyFORM reconstruction "
+                f"pipeline failed with code {return_code}."
             )
 
+        # =====================================================
+        # VERIFY PRIMARY RESULT
+        # =====================================================
 
-        print(
-            "Depth maps generated:",
-            len(depth_results),
+        primary_cloud = (
+            final_dir
+            / "skyform_pointcloud.ply"
         )
 
+        if not primary_cloud.exists():
+            raise RuntimeError(
+                "Pipeline completed but final "
+                "point cloud was not produced."
+            )
+
+        # =====================================================
+        # COMPATIBILITY BRIDGE
+        # =====================================================
 
         update_pipeline_state(
             base_dir,
-            progress=67,
-            message=(
-                f"{len(depth_results)} "
-                "AI depth maps generated."
-            ),
-            stage="depth_estimation",
-            stage_status="completed",
-        )
-
-
-        # ====================================================
-        # STAGE 5
-        # POSE-AWARE DEPTH FUSION
-        # ====================================================
-
-        update_pipeline_state(
-            base_dir,
-            progress=70,
+            progress=90,
             current_stage="depth_fusion",
             message=(
-                "Aligning AI depth with "
-                "COLMAP geometry and fusing views."
+                "Publishing reconstructed geometry "
+                "to the SkyFORM viewer."
             ),
             stage="depth_fusion",
             stage_status="running",
         )
 
-
-        reconstruction_dir.mkdir(
-            parents=True,
-            exist_ok=True,
+        shutil.copy2(
+            primary_cloud,
+            legacy_cloud,
         )
 
+        # Mesh is OPTIONAL.
+        mesh_candidates = [
+            final_dir
+            / "skyform_mesh_experimental.ply",
 
-        fusion_result = (
-            fuse_depth_maps(
-                image_dir=dense_image_dir,
-                depth_dir=depth_dir,
-                model_dir=dense_sparse_txt_dir,
-                output_path=fused_cloud_path,
-                sample_step=12,
-            )
-        )
+            job_dir
+            / "mesh"
+            / "skyform_mesh.ply",
+        ]
 
+        mesh_published = False
 
-        if (
-            not fused_cloud_path.exists()
-        ):
-            raise RuntimeError(
-                "Dense fusion did not "
-                "produce a point cloud."
-            )
-
-
-        print(
-            "Views fused:",
-            fusion_result["views"],
-        )
-
-        print(
-            "Dense points:",
-            fusion_result["points"],
-        )
-
-
-        update_pipeline_state(
-            base_dir,
-            progress=82,
-            message=(
-                f"{fusion_result['views']} views "
-                f"fused into "
-                f"{fusion_result['points']:,} points."
-            ),
-            stage="depth_fusion",
-            stage_status="completed",
-        )
-
-
-        # ====================================================
-        # STAGE 6
-        # BALL-PIVOTING MESH
-        # ====================================================
-
-        update_pipeline_state(
-            base_dir,
-            progress=85,
-            current_stage="mesh_generation",
-            message=(
-                "Generating surface mesh "
-                "from fused geometry."
-            ),
-            stage="mesh_generation",
-            stage_status="running",
-        )
-
-
-        if mesh_path.exists():
-            mesh_path.unlink()
-
-
-        mesh_result = (
-            create_mesh_from_point_cloud(
-                fused_cloud_path,
-                mesh_path,
-            )
-        )
-
-
-        if not mesh_path.exists():
-            raise RuntimeError(
-                "Mesh generation failed."
-            )
-
-
-        print(
-            "Mesh vertices:",
-            mesh_result["vertices"],
-        )
-
-        print(
-            "Mesh triangles:",
-            mesh_result["triangles"],
-        )
-
+        for candidate in mesh_candidates:
+            if candidate.exists():
+                shutil.copy2(
+                    candidate,
+                    legacy_mesh,
+                )
+                mesh_published = True
+                break
 
         update_pipeline_state(
             base_dir,
             progress=94,
             message=(
-                f"Mesh generated with "
-                f"{mesh_result['vertices']:,} vertices "
-                f"and "
-                f"{mesh_result['triangles']:,} triangles."
+                "Dense point cloud published."
             ),
-            stage="mesh_generation",
+            stage="depth_fusion",
             stage_status="completed",
         )
 
+        # =====================================================
+        # CAMERA / COLMAP COMPATIBILITY
+        # =====================================================
 
-        # ====================================================
-        # STAGE 7
-        # QUALITY ANALYSIS
-        # ====================================================
+        # status_service historically searches colmap_new/sparse.
+        # Mirror the selected job sparse model there so existing
+        # metrics continue to work without model_converter.
+        job_sparse_root = (
+            job_dir
+            / "sfm"
+            / "sparse"
+        )
+
+        legacy_sparse_root = (
+            base_dir
+            / "outputs"
+            / "colmap_new"
+            / "sparse"
+        )
+
+        if legacy_sparse_root.exists():
+            shutil.rmtree(
+                legacy_sparse_root
+            )
+
+        if job_sparse_root.exists():
+            shutil.copytree(
+                job_sparse_root,
+                legacy_sparse_root,
+            )
+
+        # Store new camera pose JSON in a stable legacy location.
+        job_pose_json = (
+            job_dir
+            / "colmap_poses"
+            / "colmap_poses.json"
+        )
+
+        legacy_pose_json = (
+            reconstruction_dir
+            / "camera_poses.json"
+        )
+
+        copy_if_exists(
+            job_pose_json,
+            legacy_pose_json,
+        )
+
+        # =====================================================
+        # FINAL STATUS
+        # =====================================================
 
         update_pipeline_state(
             base_dir,
-            progress=96,
-            current_stage="quality_analysis",
+            progress=97,
+            current_stage="mesh_generation",
             message=(
-                "Calculating reconstruction "
-                "confidence metrics."
+                "Experimental mesh generated."
+                if mesh_published
+                else
+                "Point cloud complete; "
+                "experimental mesh unavailable."
             ),
-            stage="quality_analysis",
-            stage_status="running",
+            stage="mesh_generation",
+            stage_status=(
+                "completed"
+                if mesh_published
+                else "skipped"
+            ),
         )
-
-
-        quality_result = (
-            get_quality_metrics(
-                base_dir
-            )
-        )
-
-
-        if not quality_result.get(
-            "available"
-        ):
-            raise RuntimeError(
-                "Quality analysis unavailable."
-            )
-
-
-        summary = (
-            quality_result[
-                "summary"
-            ]
-        )
-
-
-        print(
-            "Quality points:",
-            summary["point_count"],
-        )
-
-        print(
-            "Mean heuristic confidence:",
-            summary[
-                "average_confidence"
-            ],
-        )
-
-        print(
-            "Mean reprojection error:",
-            summary[
-                "average_reprojection_error"
-            ],
-        )
-
 
         update_pipeline_state(
             base_dir,
             progress=99,
+            current_stage="quality_analysis",
             message=(
-                "Quality analysis completed."
+                "Final reconstruction report generated."
             ),
             stage="quality_analysis",
             stage_status="completed",
         )
 
-
-        # ====================================================
-        # OPTIONAL GEOSPATIAL ALIGNMENT
-        # ====================================================
-
-        telemetry_file = (
-            get_gps_path(
-                base_dir,
-                video_id,
-            )
+        report = load_json(
+            final_dir
+            / "pipeline_report.json"
         )
 
-        geospatial_result = None
-
-        if telemetry_file.exists():
-            try:
-                gps_data = parse_gps_csv(
-                    telemetry_file
-                )
-
-                gps_points = gps_data.get(
-                    "points",
-                    []
-                )
-
-                # Real alignment needs timestamped GPS samples.
-                timestamped_points = [
-                    point
-                    for point in gps_points
-                    if point.get("timestamp") not in (
-                        None,
-                        "",
-                    )
-                ]
-
-                if len(timestamped_points) < 3:
-                    raise RuntimeError(
-                        "GPS telemetry exists, but at least "
-                        "3 timestamped samples are required "
-                        "for metric/geospatial alignment."
-                    )
-
-                update_pipeline_state(
-                    base_dir,
-                    progress=99,
-                    current_stage="geospatial_alignment",
-                    message=(
-                        "Aligning reconstruction "
-                        "to GPS telemetry."
-                    ),
-                )
-
-                geospatial_result = (
-                    georeference_reconstruction(
-                        base_dir,
-                        video_path,
-                        gps_data,
-                    )
-                )
-
-                print(
-                    "GPS alignment complete."
-                )
-
-                print(
-                    "Matched cameras:",
-                    geospatial_result[
-                        "matched_cameras"
-                    ],
-                )
-
-                print(
-                    "Alignment RMSE:",
-                    geospatial_result[
-                        "alignment_rmse_m"
-                    ],
-                    "m",
-                )
-
-            except Exception as error:
-                geospatial_result = {
-                    "available": False,
-                    "aligned": False,
-                    "reason": str(error),
-                }
-
-                print(
-                    "GPS alignment skipped:",
-                    error,
-                )
-
-        else:
-            geospatial_result = {
-                "available": False,
-                "aligned": False,
-                "reason": (
-                    "No GPS telemetry supplied. "
-                    "Reconstruction remains relative/unscaled."
-                ),
-            }
-
-
-        # ====================================================
-        # COMPLETE
-        # ====================================================
+        runtime = load_json(
+            final_dir
+            / "pipeline_runtime.json"
+        )
 
         mark_pipeline_complete(
             base_dir
         )
 
-
         return {
             "success": True,
-
-            "video":
-                str(video_path),
-
-            "keyframes":
-                len(saved_frames),
-
-            "dynamic_filtering":
-                dynamic_result,
-
-            "depth_maps":
-                len(depth_results),
-
-            "fusion":
-                fusion_result,
-
-            "mesh":
-                mesh_result,
-
-            "quality":
-                summary,
-
-            "geospatial":
-                geospatial_result,
-
+            "video": str(video_path),
+            "video_id": video_id,
+            "job_dir": str(job_dir),
+            "mesh_available": mesh_published,
+            "report": report,
+            "runtime": runtime,
             "artifacts": {
                 "dense_point_cloud":
+                    str(legacy_cloud),
+                "mesh": (
+                    str(legacy_mesh)
+                    if mesh_published
+                    else None
+                ),
+                "job_point_cloud":
+                    str(primary_cloud),
+                "results_zip":
                     str(
-                        fused_cloud_path
-                    ),
-
-                "mesh":
-                    str(
-                        mesh_path
+                        final_dir
+                        / "skyform_results.zip"
                     ),
             },
         }
 
-
     except Exception as error:
-
         print()
-        print(
-            "SKYFORM PIPELINE FAILED"
-        )
-
+        print("SKYFORM PIPELINE FAILED")
         traceback.print_exc()
-
 
         mark_pipeline_failed(
             base_dir,
             str(error),
         )
-
 
         raise

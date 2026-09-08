@@ -1,8 +1,14 @@
 from pathlib import Path
+import json
 import numpy as np
 
 
-def quaternion_to_rotation(qw, qx, qy, qz):
+def quaternion_to_rotation(
+    qw,
+    qx,
+    qy,
+    qz,
+):
     return np.array([
         [
             1 - 2 * (qy*qy + qz*qz),
@@ -22,80 +28,183 @@ def quaternion_to_rotation(qw, qx, qy, qz):
     ])
 
 
-def get_camera_poses(base_dir):
-    base_dir = Path(base_dir)
-
-    images_file = (
-        base_dir
+def get_active_video_id(base_dir):
+    state_path = (
+        Path(base_dir)
         / "outputs"
-        / "colmap_new"
-        / "dense"
-        / "sparse_txt"
-        / "images.txt"
+        / "pipeline_state.json"
     )
 
-    if not images_file.exists():
+    if not state_path.exists():
+        return None
+
+    try:
+        with open(
+            state_path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            state = json.load(file)
+
+        return state.get("video_id")
+
+    except Exception:
+        return None
+
+
+def normalize_pose_data(data):
+    """
+    Accept Stage-4 JSON without forcing one exact JSON shape.
+    """
+    if isinstance(data, list):
+        entries = data
+
+    elif isinstance(data, dict):
+        entries = (
+            data.get("poses")
+            or data.get("images")
+            or data.get("camera_poses")
+            or []
+        )
+
+    else:
         return []
 
     poses = []
 
-    with open(images_file, "r") as file:
-        lines = file.readlines()
-
-    # COLMAP images.txt uses two lines per image:
-    # image metadata
-    # POINTS2D observations
-    valid_lines = [
-        line.strip()
-        for line in lines
-        if line.strip()
-        and not line.startswith("#")
-    ]
-
-    for i in range(0, len(valid_lines), 2):
-        parts = valid_lines[i].split()
-
-        if len(parts) < 10:
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
             continue
 
-        image_id = int(parts[0])
-
-        qw = float(parts[1])
-        qx = float(parts[2])
-        qy = float(parts[3])
-        qz = float(parts[4])
-
-        tx = float(parts[5])
-        ty = float(parts[6])
-        tz = float(parts[7])
-
-        image_name = parts[9]
-
-        R = quaternion_to_rotation(
-            qw, qx, qy, qz
+        image_name = (
+            entry.get("image")
+            or entry.get("name")
+            or entry.get("image_name")
+            or f"frame_{index:04d}.jpg"
         )
 
-        t = np.array([
-            tx,
-            ty,
-            tz
-        ])
+        image_id = (
+            entry.get("id")
+            or entry.get("image_id")
+            or index
+        )
 
-        # COLMAP world-space camera center
-        center = -R.T @ t
+        # Stage 4 may already store camera center.
+        position = (
+            entry.get("position")
+            or entry.get("camera_center")
+            or entry.get("center")
+        )
+
+        rotation = (
+            entry.get("rotation_matrix")
+            or entry.get("R")
+        )
+
+        # Or it may store COLMAP qvec/tvec.
+        if position is None:
+            qvec = entry.get("qvec")
+            tvec = entry.get("tvec")
+
+            if (
+                qvec is not None
+                and tvec is not None
+                and len(qvec) == 4
+                and len(tvec) == 3
+            ):
+                R = quaternion_to_rotation(
+                    float(qvec[0]),
+                    float(qvec[1]),
+                    float(qvec[2]),
+                    float(qvec[3]),
+                )
+
+                t = np.asarray(
+                    tvec,
+                    dtype=float,
+                )
+
+                center = -R.T @ t
+
+                position = center.tolist()
+
+                if rotation is None:
+                    rotation = R.T.tolist()
+
+        if position is None:
+            continue
 
         poses.append({
-            "id": image_id,
-            "image": image_name,
-
+            "id": int(image_id),
+            "image": str(image_name),
             "position": [
-                float(center[0]),
-                float(center[1]),
-                float(center[2]),
+                float(position[0]),
+                float(position[1]),
+                float(position[2]),
             ],
-
             "rotation_matrix":
-                R.tolist(),
+                rotation
+                if rotation is not None
+                else [],
         })
 
     return poses
+
+
+def get_camera_poses(base_dir):
+    base_dir = Path(base_dir)
+
+    video_id = get_active_video_id(
+        base_dir
+    )
+
+    candidates = []
+
+    if video_id:
+        candidates.append(
+            base_dir
+            / "outputs"
+            / "jobs"
+            / video_id
+            / "colmap_poses"
+            / "colmap_poses.json"
+        )
+
+    if not video_id:
+        candidates.append(
+        base_dir
+        / "outputs"
+        / "reconstruction"
+        / "camera_poses.json"
+    )
+
+    for path in candidates:
+        if not path.exists():
+            continue
+
+        try:
+            with open(
+                path,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                data = json.load(file)
+
+            poses = normalize_pose_data(
+                data
+            )
+
+            if poses:
+                from urllib.parse import quote
+                for pose in poses:
+                    if video_id:
+                        pose["image_url"] = f"/outputs/jobs/{quote(video_id)}/frames/{quote(pose['image'])}"
+                return poses
+
+        except Exception as error:
+            print(
+                "Camera pose read error:",
+                error,
+            )
+
+    return []
