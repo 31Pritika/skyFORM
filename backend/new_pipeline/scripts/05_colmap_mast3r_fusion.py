@@ -1,6 +1,14 @@
 from pathlib import Path
+import os
 import sys
 import struct
+
+# HuggingFace's Xet transfer backend (hf-xet) buffers large downloads in RAM
+# and can stall on a memory-constrained / headless box, wedging the first-time
+# MASt3R checkpoint fetch. Force the classic streaming HTTP downloader unless
+# the caller has deliberately chosen otherwise.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 import numpy as np
 import cv2
 import torch
@@ -49,7 +57,44 @@ from dust3r.utils.device import to_numpy
 # CONFIG
 # ============================================================
 
-DEVICE = "mps"
+def _select_device():
+    """Pick the best available torch backend.
+
+    The pipeline was originally written for Apple Silicon (mps). On a
+    headless Linux/CPU box we fall back to CUDA when present, otherwise CPU.
+    Override with SKYFORM_FUSION_DEVICE if needed.
+    """
+    forced = os.environ.get("SKYFORM_FUSION_DEVICE", "").strip().lower()
+    if forced:
+        return forced
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return "mps"
+
+    return "cpu"
+
+
+def _empty_device_cache():
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    elif DEVICE == "mps" and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+DEVICE = _select_device()
+
+# CPU inference is compute-bound here; the pipeline is normally launched with
+# OMP_NUM_THREADS=1, which would make ViT-Large inference painfully slow. Give
+# the ATen intra-op pool a sane default (overridable via SKYFORM_FUSION_THREADS).
+if DEVICE == "cpu":
+    import multiprocessing as _mp
+
+    _default_threads = max(1, min(8, (_mp.cpu_count() or 2) - 2))
+    _threads = int(os.environ.get("SKYFORM_FUSION_THREADS", str(_default_threads)))
+    torch.set_num_threads(max(1, _threads))
 
 MODEL_NAME = (
     "naver/"
@@ -57,6 +102,58 @@ MODEL_NAME = (
 )
 
 IMAGE_SIZE = 512
+
+
+def load_mast3r_model(model_name, device):
+    """Load the MASt3R checkpoint without holding two full copies of the weights.
+
+    HuggingFace's ``PyTorchModelHubMixin.from_pretrained`` first allocates the
+    module with random init (~2 GB for ViT-Large) and then loads a second full
+    copy of the state dict before assigning - a transient ~4 GB peak that thrashes
+    a memory-constrained box. Instead we build the module on the ``meta`` device
+    (no parameter storage) and assign the checkpoint tensors straight in.
+
+    Falls back to the stock loader for local checkpoint files or non-CPU devices.
+    """
+    from mast3r.model import AsymmetricMASt3R
+
+    if os.path.isfile(model_name) or device != "cpu":
+        return AsymmetricMASt3R.from_pretrained(model_name).to(device).eval()
+
+    import json as _json
+    import gc as _gc
+    import safetensors.torch as _st
+    from huggingface_hub import hf_hub_download
+
+    config_path = hf_hub_download(model_name, "config.json")
+    weights_path = hf_hub_download(model_name, "model.safetensors")
+
+    with open(config_path) as fh:
+        config = _json.load(fh)
+
+    with torch.device("meta"):
+        model = AsymmetricMASt3R(**config)
+
+    state_dict = _st.load_file(weights_path)
+    missing, unexpected = model.load_state_dict(
+        state_dict, strict=False, assign=True
+    )
+    del state_dict
+    _gc.collect()
+
+    # The only tolerated "missing" keys are the DPT ``scratch.layer_rn.N``
+    # aliases, which share module objects with ``scratch.layerN_rn`` and are
+    # already populated. Anything else - or any tensor still on meta - is fatal.
+    real_missing = [k for k in missing if ".scratch.layer_rn." not in k]
+    stranded = [n for n, p in list(model.named_parameters()) + list(model.named_buffers())
+                if p.is_meta]
+    if real_missing or unexpected or stranded:
+        raise RuntimeError(
+            "MASt3R checkpoint load mismatch: "
+            f"missing={real_missing} unexpected={unexpected} still_meta={stranded}"
+        )
+
+    return model.to(device).eval()
 
 def get_registered_frame_names(images):
     frame_names = []
@@ -605,10 +702,12 @@ def main():
     print(" SKYFORM - COLMAP + MASt3R FIXED-POSE FUSION")
     print("==============================================")
 
-    if not torch.backends.mps.is_available():
+    print(f"\nMASt3R inference device: {DEVICE}")
 
-        raise RuntimeError(
-            "MPS is not available."
+    if DEVICE == "cpu":
+        print(
+            "  (running on CPU - expect slower per-pair inference; "
+            "peak RAM is dominated by the ViT-Large model + one image pair)"
         )
 
     print("\nReading COLMAP reconstruction...")
@@ -680,13 +779,12 @@ def main():
 
     print("\nLoading MASt3R model...")
 
-    model = AsymmetricMASt3R.from_pretrained(
-        MODEL_NAME
-    ).to(DEVICE)
+    model = load_mast3r_model(MODEL_NAME, DEVICE)
 
-    model.eval()
-
-    print("MASt3R model loaded.")
+    print(
+        f"MASt3R model loaded (device={DEVICE}, "
+        f"torch_threads={torch.get_num_threads()})."
+    )
 
     print("\nLoading selected images...")
 
@@ -824,8 +922,7 @@ def main():
 
         gc.collect()
 
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
+        _empty_device_cache()
 
         print(
             f"  Pair {i + 1}/"
@@ -837,9 +934,9 @@ def main():
     # ========================================================
 
     del model
+    gc.collect()
 
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
+    _empty_device_cache()
 
     # ========================================================
     # FUSE INTO COLMAP WORLD

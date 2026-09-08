@@ -165,6 +165,7 @@ def main():
     # --------------------------------------------------------
 
     mesh_available = False
+    fbx_error = None
 
     if MESH_PLY.exists():
         shutil.copy2(
@@ -173,7 +174,14 @@ def main():
         )
         surface = trimesh.load(str(MESH_PLY), process=False)
         surface.export(str(FINAL_DIR / "skyform_mesh_experimental.glb"))
-        export_fbx(FINAL_DIR / "skyform_mesh_experimental.glb", FINAL_DIR / "skyform_mesh_experimental.fbx")
+        # FBX conversion depends on the external Assimp CLI. Treat it as a
+        # best-effort extra format: a missing/failing Assimp must not sink the
+        # whole export, which also produces PLY, OBJ, GLB and glTF.
+        try:
+            export_fbx(FINAL_DIR / "skyform_mesh_experimental.glb", FINAL_DIR / "skyform_mesh_experimental.fbx")
+        except Exception as error:
+            fbx_error = str(error)
+            print(f"WARNING: FBX export skipped ({fbx_error})")
         for filename, content in trimesh.exchange.gltf.export_gltf(surface).items():
             (FINAL_DIR / filename).write_bytes(content)
         mesh_available = True
@@ -252,10 +260,17 @@ def main():
     }
 
     if mesh_available:
-        info["output"]["formats"].extend([
+        mesh_formats = [
             "experimental mesh PLY",
-            "experimental mesh OBJ", "GLB", "glTF", "FBX"
-        ])
+            "experimental mesh OBJ", "GLB", "glTF",
+        ]
+        if fbx_error is None and (FINAL_DIR / "skyform_mesh_experimental.fbx").exists():
+            mesh_formats.append("FBX")
+        else:
+            info["output"]["fbx_unavailable_reason"] = (
+                fbx_error or "Assimp CLI not found"
+            )
+        info["output"]["formats"].extend(mesh_formats)
 
     print("Writing metadata...")
 
