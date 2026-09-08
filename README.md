@@ -1,124 +1,92 @@
 # SkyFORM
 
-SkyFORM converts a single-pass drone video into a reconstructed 3D scene using computer vision and AI.
+SkyFORM turns drone video into a 3D reconstruction.
 
-The system performs frame selection, dynamic-object filtering, camera reconstruction, monocular depth estimation, multi-view fusion, point-cloud generation, mesh reconstruction, reconstruction-quality analysis, visualization, and 3D model export.
+It can create:
 
-## Tech Stack
+- A camera path
+- A point cloud
+- A 3D mesh
+- Quality and confidence information
+- Export files such as PLY, OBJ, GLB, LAS, GeoTIFF, and FBX
 
-### Backend
-- Python
-- FastAPI
-- OpenCV
-- PyTorch
-- Depth Anything V2
-- YOLOv8
-- COLMAP
-- Open3D
+The project has:
 
-### Frontend
-- React
-- Vite
-- Three.js
-- React Three Fiber
+- A Python/FastAPI backend for video processing
+- A React/Vite frontend for the web interface
 
----
+## Before You Start
 
-# Running SkyFORM
+You need:
 
-## Requirements
-
-Install:
-
-- Python 3
-- Node.js + npm
-- COLMAP
+- macOS or Linux
+- Python 3.9 or newer
+- Node.js 18 or newer
 - Git
+- FFmpeg, including `ffprobe`
+- COLMAP
+- Assimp for FBX export
 
-On macOS, Homebrew can be used to install the required system packages.
+### Install system tools on macOS
 
----
-
-## 1. Clone the repository
+Install Homebrew from [brew.sh](https://brew.sh) if it is not already installed. Then run:
 
 ```bash
-git clone <YOUR-GITHUB-REPOSITORY-URL>
+brew install ffmpeg colmap assimp
+```
+
+Check that the tools are available:
+
+```bash
+python3 --version
+node --version
+ffprobe -version
+colmap -h
+assimp version
+```
+
+## Download SkyFORM
+
+```bash
+git clone https://github.com/joel1701/skyFORM.git
 cd skyFORM
 ```
 
----
+## Start the Backend
 
-## 2. Backend Setup
-
-Go to the backend:
+Open a terminal in the project folder and run:
 
 ```bash
 cd backend
-```
-
-Create a Python virtual environment:
-
-```bash
 python3 -m venv venv
-```
-
-Activate it.
-
-### macOS / Linux
-
-```bash
 source venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r external/mast3r/requirements.txt
 ```
 
-### Windows
+Start the API:
 
 ```bash
-venv\Scripts\activate
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Install the required Python packages:
+Keep this terminal open.
 
-```bash
-pip install -r requirements.txt
-```
+Test the backend in a browser:
 
-Start the backend:
+- Health check: <http://127.0.0.1:8000/health>
+- API documentation: <http://127.0.0.1:8000/docs>
 
-### macOS / Linux
-
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uvicorn app.main:app --port 8000
-```
-
-### Windows
-
-```bash
-uvicorn app.main:app --port 8000
-```
-
-The API should now be available at:
-
-```text
-http://127.0.0.1:8000
-```
-
-Test it by opening:
-
-```text
-http://127.0.0.1:8000/health
-```
-
-You should receive:
+The health check should return:
 
 ```json
 {"status":"healthy"}
 ```
 
----
+## Start the Frontend
 
-## 3. Frontend Setup
-
-Open another terminal:
+Open a second terminal in the project folder:
 
 ```bash
 cd frontend
@@ -126,70 +94,157 @@ npm install
 npm run dev
 ```
 
-Open the URL shown by Vite, normally:
+Open the URL printed by Vite, usually:
+
+<http://localhost:5173>
+
+The frontend expects the backend to be running at `http://127.0.0.1:8000`.
+
+## Current Frontend Note
+
+The current frontend entry point imports a stylesheet that is not yet in the repository:
 
 ```text
-http://localhost:5173
+frontend/src/portal/portal.css
 ```
 
----
+Because of this, `npm run build` currently fails until that stylesheet is restored or the import in `frontend/src/App.jsx` is updated. The backend can still be started and tested through the API documentation at <http://127.0.0.1:8000/docs>.
 
-# Using SkyFORM
+## Use the API
 
-1. Upload a drone or moving-camera video.
-2. Optionally provide GPS/flight metadata.
-3. Start reconstruction.
-4. Wait for the reconstruction pipeline to complete.
-5. Explore the generated:
-   - 3D Point Cloud
-   - 3D Mesh
-   - Confidence / Quality Map
-   - Camera Path
-6. Download the reconstructed model.
+The easiest way to explore the backend is the interactive API page:
 
-Current export formats include:
+<http://127.0.0.1:8000/docs>
 
-- PLY
-- OBJ
-- GLB
+The main workflow is:
 
----
+1. Upload a video.
+2. Add flight or GPS metadata if available.
+3. Start a reconstruction job.
+4. Check the job status while it runs.
+5. View the camera path, point cloud, mesh, and quality results.
+6. Download the exported files.
 
-# Reconstruction Pipeline
+The API stores temporary input files in:
+
+```text
+backend/uploads/
+```
+
+Generated results are stored in:
+
+```text
+backend/outputs/
+```
+
+These folders are local runtime data and are intentionally ignored by Git.
+
+## Run the Tests
+
+With the backend virtual environment activated:
+
+```bash
+cd backend
+python -m pytest
+```
+
+Run the frontend checks from another terminal:
+
+```bash
+cd frontend
+npm run lint
+npm run build
+```
+
+The frontend build will continue to report the missing `portal.css` file until the current frontend issue is fixed.
+
+## Reconstruction Pipeline
+
+SkyFORM processes a video in stages:
 
 ```text
 Video
-  ↓
-Frame Selection
-  ↓
-YOLO Dynamic Object Filtering
-  ↓
-COLMAP Camera Reconstruction
-  ↓
-Depth Anything V2
-  ↓
-Multi-View Fusion
-  ↓
-Point Cloud Cleaning
-  ↓
-3D Point Cloud
-  ↓
-Mesh Generation
-  ↓
-Quality Analysis
-  ↓
-Interactive 3D Viewer + Export
+  -> Video information and frame extraction
+  -> Dynamic-object filtering
+  -> COLMAP camera reconstruction
+  -> MASt3R depth and multi-view fusion
+  -> Point-cloud cleanup
+  -> Mesh generation
+  -> Quality analysis
+  -> Export files
 ```
 
----
+The default frame limit is 300 frames. To change it:
 
-# Notes
+```bash
+SKYFORM_MAX_FRAMES=600 uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-- The first run may download the required AI models.
-- An internet connection may therefore be required for initial model setup.
-- GPU acceleration is used when supported; SkyFORM can also run on CPU.
-- COLMAP must be installed separately and accessible from the terminal.
-- Without GPS/GCP/known scale information, the reconstruction uses a relative coordinate system.
-- GPS-enabled metric/geospatial reconstruction requires suitable timestamped telemetry.
+More frames can improve coverage but will increase processing time and memory use.
 
-If setup fails on your operating system, provide this README and the error message to an LLM or debugging assistant for OS-specific installation instructions.
+## GPS and Scale
+
+Without GPS, ground-control points, or another known scale reference, the reconstruction uses relative coordinates. It should not be interpreted as a metric survey.
+
+GPS-based alignment requires usable timestamped flight telemetry. Independent checkpoints are required when checking reconstruction accuracy.
+
+## Troubleshooting
+
+### `uvicorn: command not found`
+
+Activate the backend virtual environment and install the requirements again:
+
+```bash
+cd backend
+source venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+### `ffprobe: command not found`
+
+Install FFmpeg:
+
+```bash
+brew install ffmpeg
+```
+
+### `colmap: command not found`
+
+Install COLMAP:
+
+```bash
+brew install colmap
+```
+
+### The frontend cannot connect to the backend
+
+Make sure both terminals are running and open:
+
+- Frontend: <http://localhost:5173>
+- Backend: <http://127.0.0.1:8000/health>
+
+### A reconstruction is slow or runs out of memory
+
+Use a shorter video or reduce the frame limit:
+
+```bash
+SKYFORM_MAX_FRAMES=150 uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+GPU acceleration is used when the installed PyTorch environment supports it. CPU processing is also supported but is slower.
+
+## Project Folders
+
+```text
+backend/app/                 FastAPI application and services
+backend/new_pipeline/        Standalone reconstruction pipeline scripts
+backend/external/mast3r/     Vendored MASt3R code
+backend/tests/                Backend tests
+backend/uploads/              Local uploaded videos
+backend/outputs/              Local generated results
+frontend/src/                 React application
+```
+
+## License and Third-Party Software
+
+SkyFORM includes or uses third-party computer-vision software. See the license and notice files in `backend/external/mast3r/` before redistributing the project.
