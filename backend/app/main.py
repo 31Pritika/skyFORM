@@ -865,6 +865,10 @@ async def upload_video(
                 f"{frame['filename']}"
             )
 
+        metadata_dir = OUTPUT_DIR / "videos"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        (metadata_dir / f"{video_id}.json").write_text(json.dumps({"id": video_id, "original_filename": original_filename, "stored_filename": saved_filename, **metadata, "preview_frames": preview_frames}))
+
         # ----------------------------------------
         # RESPONSE
         # ----------------------------------------
@@ -932,3 +936,7 @@ def validate_reconstruction_checkpoints(video_id: str, payload: CheckpointPayloa
         for artifact in sorted(final.iterdir()):
             if artifact.is_file() and artifact.suffix != ".zip": archive.write(artifact, artifact.name)
     return result
+
+
+from app.services.portal_service import create_portal_router
+app.include_router(create_portal_router(BASE_DIR))

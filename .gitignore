@@ -23,6 +23,8 @@ dist/
 # Uploaded/runtime data
 backend/uploads/
 backend/outputs/
+backend_backup_before_new_pipeline/uploads/
+backend_backup_before_new_pipeline/outputs/
 data/
 
 # Models / large generated files

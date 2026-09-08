@@ -30,3 +30,4 @@ scipy>=1.10
 scikit-image>=0.21
 rasterio==1.4.3
 pyproj==3.6.1
+reportlab>=4
