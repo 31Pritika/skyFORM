@@ -24,6 +24,7 @@ websockets==15.0.1
 
 # Reconstruction runtime (also requires the vendored MASt3R requirements).
 laspy==2.6.1
+ultralytics==8.4.142  # YOLOv8n dynamic-object filtering (03_sfm.py, SKYFORM_FILTER_DYNAMIC=1)
 open3d>=0.18
 trimesh>=4
 scipy>=1.10

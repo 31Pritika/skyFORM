@@ -273,6 +273,30 @@ def main():
         )
 
     # ---------------------------------------------------------
+    # OPTIONAL: DYNAMIC-OBJECT FILTERING
+    # ---------------------------------------------------------
+
+    # With SKYFORM_FILTER_DYNAMIC=1, mask moving objects (vehicles,
+    # people, animals) out of the frames before feature extraction so
+    # they cannot pollute multi-view matches / camera poses. Frames are
+    # edited in place, so stage 05 fusion (same frame dir) benefits too.
+    # Non-fatal by design: a detector failure must not sink the run.
+
+    if os.environ.get("SKYFORM_FILTER_DYNAMIC") == "1":
+        print("\n[dynamic-object filtering enabled]")
+        try:
+            from dynamic_filter import filter_dynamic_frames
+            filter_dynamic_frames(frames_dir)
+        except Exception as exc:
+            print(f"[WARNING] Dynamic-object filtering failed: {exc}")
+            print("Continuing with unfiltered frames.")
+    else:
+        print(
+            "\n[dynamic-object filtering disabled "
+            "(set SKYFORM_FILTER_DYNAMIC=1 to enable)]"
+        )
+
+    # ---------------------------------------------------------
     # CLEAN ONLY THIS JOB'S PREVIOUS SFM RESULT
     # ---------------------------------------------------------
 
