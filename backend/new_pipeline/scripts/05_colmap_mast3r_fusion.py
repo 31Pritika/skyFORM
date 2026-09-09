@@ -101,7 +101,63 @@ MODEL_NAME = (
     "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
 )
 
-IMAGE_SIZE = 512
+
+def _fusion_image_size():
+    """MASt3R inference resolution (long side, in px).
+
+    512 is the checkpoint-native size and the quality default, but it dominates
+    runtime (~31s/pair on CPU). Set SKYFORM_FUSION_IMAGE_SIZE=256 (or 224) for
+    fast iteration / testing, and switch back to 512 for demo-quality runs.
+
+    Notes:
+      * dust3r ``load_images`` treats 224 specially: short-side resize + a
+        224x224 square center-crop. ``image_geometry.crop_transform`` models
+        the long-side-resize path only, so 224 also has a coordinate-mapping
+        mismatch -- prefer 256 as the fast setting (full FOV, correct geometry).
+      * Any value other than 224 resizes the long side to that size and crops
+        each side to a multiple of 16 (aspect ratio preserved via square_ok).
+      * Lower resolution => fewer tokens => faster, but coarser / less
+        accurate metric depth.
+    """
+    raw = os.environ.get("SKYFORM_FUSION_IMAGE_SIZE", "").strip()
+    if not raw:
+        return 512
+
+    try:
+        size = int(raw)
+    except ValueError:
+        print(
+            f"  WARNING: SKYFORM_FUSION_IMAGE_SIZE={raw!r} is not an integer; "
+            "using 512."
+        )
+        return 512
+
+    if size < 96:
+        print(f"  WARNING: SKYFORM_FUSION_IMAGE_SIZE={size} too small; using 96.")
+        size = 96
+
+    if size == 224:
+        print(
+            "  NOTE: SKYFORM_FUSION_IMAGE_SIZE=224 uses dust3r's square "
+            "center-crop path, which crop_transform does not model -> depth "
+            "reprojection will be slightly misaligned. Prefer 256."
+        )
+    elif size not in (256, 320, 384, 448, 512):
+        print(
+            f"  NOTE: SKYFORM_FUSION_IMAGE_SIZE={size} is non-standard "
+            "(MASt3R is trained at 512). Proceeding."
+        )
+
+    if size != 512:
+        print(
+            f"  MASt3R inference resolution overridden to {size}px "
+            "(faster, lower depth accuracy than the native 512)."
+        )
+
+    return size
+
+
+IMAGE_SIZE = _fusion_image_size()
 
 
 def load_mast3r_model(model_name, device):
@@ -489,7 +545,7 @@ def estimate_depth_scale(
             continue
 
         # Original image -> MASt3R image coordinates
-        mx, my = original_to_prediction(x, y, camera, W, H)
+        mx, my = original_to_prediction(x, y, camera, W, H, IMAGE_SIZE)
         mx, my = int(round(float(mx))), int(round(float(my)))
 
         if (
@@ -634,7 +690,7 @@ def make_camera_rays(
     # Convert MASt3R resized coordinates
     # back to original image coordinates.
 
-    u, v = prediction_to_original(xx, yy, camera, width, height)
+    u, v = prediction_to_original(xx, yy, camera, width, height, IMAGE_SIZE)
 
     pixels = np.stack(
         [u, v],
@@ -1149,7 +1205,7 @@ def main():
         )
 
         grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
-        source_x, source_y = prediction_to_original(grid_x, grid_y, camera, W, H)
+        source_x, source_y = prediction_to_original(grid_x, grid_y, camera, W, H, IMAGE_SIZE)
         image_rgb = cv2.remap(image_rgb, source_x.astype(np.float32),
                               source_y.astype(np.float32), cv2.INTER_LINEAR)
 
