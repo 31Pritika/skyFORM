@@ -396,3 +396,72 @@ def mark_pipeline_failed(
         )
 
         return state
+
+
+def reconcile_interrupted_pipeline(
+    base_dir,
+):
+    """
+    Called once on backend startup.
+
+    The reconstruction pipeline only runs
+    in-process (a BackgroundTask that spawns a
+    child subprocess). If the backend restarts,
+    any state still marked "running" is an
+    orphan from a process that no longer exists
+    - e.g. the terminal was closed mid-run.
+
+    Clearing it here means the next upload
+    starts a fresh run at 0% instead of being
+    rejected with "a reconstruction is already
+    running" or resuming a dead job's progress.
+
+    Returns the reconciled state, or the
+    unchanged state if nothing was running.
+    """
+
+    with PIPELINE_LOCK:
+        state = get_pipeline_state(
+            base_dir
+        )
+
+        if (
+            state.get("status")
+            != "running"
+        ):
+            return state
+
+        current_stage = state.get(
+            "current_stage"
+        )
+
+        state["status"] = "failed"
+
+        state["progress"] = 0
+
+        state["message"] = (
+            "Reconstruction interrupted "
+            "(backend restarted). Upload "
+            "again to start a fresh run."
+        )
+
+        state["error"] = (
+            "Interrupted: backend restarted "
+            "while reconstruction was running."
+        )
+
+        state["completed_at"] = (
+            datetime.now().isoformat()
+        )
+
+        if current_stage:
+            state["stages"][
+                current_stage
+            ] = "failed"
+
+        _write_state(
+            base_dir,
+            state,
+        )
+
+        return state

@@ -39,6 +39,8 @@ from app.services.status_service import (
 from app.services.pipeline_service import (
     get_pipeline_state,
     try_start_pipeline,
+    reconcile_interrupted_pipeline,
+    reset_pipeline_state,
 )
 
 from app.services.reconstruction_pipeline import (
@@ -94,6 +96,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -156,6 +159,36 @@ EXPORT_DIR.mkdir(
     parents=True,
     exist_ok=True,
 )
+
+
+# ============================================================
+# STARTUP RECONCILIATION
+# ============================================================
+
+@app.on_event("startup")
+def _reconcile_pipeline_on_startup():
+    """
+    Clear any reconstruction left marked
+    "running" by a previous backend process
+    that died mid-run (e.g. the terminal was
+    closed). Without this, the next upload
+    either gets a 409 or appears to resume the
+    dead job's progress instead of starting
+    fresh at 0%.
+    """
+
+    reconciled = (
+        reconcile_interrupted_pipeline(
+            BASE_DIR
+        )
+    )
+
+    if reconciled.get("error"):
+        print(
+            "[startup] Cleared interrupted "
+            "reconstruction: "
+            f"{reconciled.get('video_id')}"
+        )
 
 
 # ============================================================
@@ -752,6 +785,34 @@ def start_reconstruction(
         "message": (
             "SkyFORM reconstruction "
             "started."
+        ),
+    }
+
+
+@app.post(
+    "/api/reconstruction/reset"
+)
+def reset_reconstruction():
+    """
+    Force the pipeline back to idle.
+
+    Manual escape hatch for a run that is
+    wedged in "running" - e.g. a job whose
+    process was killed. After this the next
+    upload starts a fresh run at 0%.
+    """
+
+    state = reset_pipeline_state(
+        BASE_DIR
+    )
+
+    return {
+        "success": True,
+        "status": state["status"],
+        "progress": state["progress"],
+        "message": (
+            "Reconstruction pipeline "
+            "reset to idle."
         ),
     }
 
