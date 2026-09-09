@@ -7,6 +7,16 @@ import * as THREE from "three";
 const API = "http://localhost:8000";
 const modes = { points: "Point Cloud", mesh: "Mesh", confidence: "Confidence", cameras: "Camera Path" };
 
+// COLMAP reconstructs in its own world frame: the camera convention (+X right,
+// +Y down, +Z forward) is propagated to the world by the first registered view,
+// so for down-looking drone footage the scene comes out roughly Z-down / Y-back.
+// Three.js is Y-up, so the raw model loads upside down / on its side. A +90°
+// roll about X re-seats "down" onto -Y for every source at once (point cloud,
+// mesh, confidence points, camera markers + frustums all share this frame).
+// If a capture instead reconstructs Y-down, use [Math.PI, 0, 0]; the group below
+// is the single place to adjust.
+const AXIS_CORRECTION = [Math.PI / 2, 0, 0];
+
 function useGeometry(file, jobId) {
   const [result, setResult] = useState({ geometry: null, error: null });
   useEffect(() => {
@@ -89,6 +99,7 @@ function Scene({ geometry, cameras, mode, autoRotate, selected, onSelect, meshSt
     <ambientLight intensity={.6} />
     <directionalLight position={[3,5,4]} intensity={2.2} />
     <directionalLight position={[-4,1,-2]} intensity={1} />
+    <group rotation={AXIS_CORRECTION}>
     {normalized && !(mode === "cameras" && pathOnly) && (mode === "mesh" ? <mesh geometry={normalized}>
       <meshStandardMaterial color={meshStyle === "color" && normalized.hasAttribute("color") ? "#ffffff" : "#a9bdce"} vertexColors={meshStyle === "color" && normalized.hasAttribute("color")} roughness={.85} metalness={0} side={THREE.DoubleSide} wireframe={meshStyle === "wireframe"} />
     </mesh> : <points geometry={normalized}>
@@ -98,6 +109,7 @@ function Scene({ geometry, cameras, mode, autoRotate, selected, onSelect, meshSt
       {normalizedCameras.length > 1 && <Line points={normalizedCameras.map((camera) => camera.position)} color="#38bdf8" lineWidth={2} depthTest={false} />}
       {normalizedCameras.map((camera, index) => <CameraMarker key={camera.id ?? camera.image} camera={camera} index={index} count={cameras.length} selected={index === selected} onSelect={onSelect} />)}
     </group>}
+    </group>
     <OrbitControls key={`${mode}-${reset}`} makeDefault enableDamping autoRotate={autoRotate} autoRotateSpeed={.6} />
   </>;
 }
