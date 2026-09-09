@@ -47,6 +47,42 @@ HEAVY_SIFT_FRAME_LIMIT = int(
     os.environ.get("SKYFORM_SFM_HEAVY_SIFT_LIMIT", "400")
 )
 
+# --- Low-memory profile -------------------------------------------------
+#
+# This COLMAP is built without CUDA, so SIFT extraction and matching run
+# on the CPU. On a small box (a few GB of RAM - typical for WSL2 and
+# entry cloud instances) the "robust" defaults below - 16k features per
+# image, affine-shape estimation, domain-size pooling, guided matching,
+# 32k matches per pair, one worker thread per core - drive a single
+# colmap process well past 5 GB of virtual memory. The kernel OOM-killer
+# then kills it partway through this stage and the whole pipeline dies at
+# ~24%.
+#
+# SKYFORM_SFM_LOW_MEM (default on) caps every one of those knobs to
+# something that fits in ~2 GB. Set SKYFORM_SFM_LOW_MEM=0 to restore the
+# previous, heavier behaviour on a machine that can afford it.
+LOW_MEM = os.environ.get("SKYFORM_SFM_LOW_MEM", "1") != "0"
+
+# Longest image edge handed to the SIFT extractor. Drone frames are
+# usually 1920x1080; 1024 still gives COLMAP plenty of texture to solve
+# camera poses (the dense detail comes from stage 05 MASt3R fusion, which
+# has its own SKYFORM_FUSION_IMAGE_SIZE knob) while cutting the
+# extractor's pyramid memory to roughly a third of the 1920px cost.
+SFM_MAX_IMAGE_SIZE = os.environ.get(
+    "SKYFORM_SFM_MAX_IMAGE_SIZE", "1024" if LOW_MEM else "3200"
+)
+
+# Worker threads for the CPU extractor / matcher. Each thread carries its
+# own image pyramid + descriptor buffers, so "-1" (all cores) multiplies
+# peak RSS by the core count. On a ~4 GB box shared with an editor /
+# language servers, 2 is the ceiling that reliably avoids the OOM killer.
+SFM_NUM_THREADS = os.environ.get(
+    "SKYFORM_SFM_NUM_THREADS", "2" if LOW_MEM else "-1"
+)
+
+MAX_NUM_FEATURES = "4096" if LOW_MEM else "16384"
+MAX_NUM_MATCHES = "8192" if LOW_MEM else "32768"
+
 
 def feature_extractor_args(frame_count):
     args = [
@@ -54,12 +90,21 @@ def feature_extractor_args(frame_count):
         # NOTE: stage 05 fusion (make_camera_rays) currently requires
         # SIMPLE_RADIAL. Do not change this without updating stage 05.
         "--ImageReader.camera_model", "SIMPLE_RADIAL",
-        "--SiftExtraction.max_num_features", "16384",
+        # Built without CUDA - be explicit so COLMAP never tries to spin
+        # up a GL/GPU SIFT context under offscreen Qt.
+        "--SiftExtraction.use_gpu", "0",
+        "--SiftExtraction.num_threads", SFM_NUM_THREADS,
+        "--SiftExtraction.max_image_size", SFM_MAX_IMAGE_SIZE,
+        "--SiftExtraction.max_num_features", MAX_NUM_FEATURES,
         "--SiftExtraction.edge_threshold", "16",
         "--SiftExtraction.peak_threshold", "0.00333",
     ]
 
-    if frame_count <= HEAVY_SIFT_FRAME_LIMIT:
+    # affine-shape estimation + domain-size pooling roughly triple the
+    # extractor's memory and CPU cost. Worth it on a big machine; on a
+    # low-mem CPU box they are exactly what tips COLMAP into the OOM
+    # killer, so they stay off whenever the low-mem profile is active.
+    if not LOW_MEM and frame_count <= HEAVY_SIFT_FRAME_LIMIT:
         args += [
             "--SiftExtraction.estimate_affine_shape", "1",
             "--SiftExtraction.domain_size_pooling", "1",
@@ -68,9 +113,11 @@ def feature_extractor_args(frame_count):
     return args
 
 MATCHER_COMMON_ARGS = [
-    "--SiftMatching.guided_matching", "1",
+    "--SiftMatching.use_gpu", "0",
+    "--SiftMatching.num_threads", SFM_NUM_THREADS,
+    "--SiftMatching.guided_matching", "0" if LOW_MEM else "1",
     "--SiftMatching.max_ratio", "0.85",
-    "--SiftMatching.max_num_matches", "32768",
+    "--SiftMatching.max_num_matches", MAX_NUM_MATCHES,
 ]
 
 SEQUENTIAL_MATCHER_ARGS = [
@@ -409,6 +456,11 @@ def main():
 
                 "--Mapper.multiple_models",
                 "1",
+
+                # Bound bundle-adjustment memory on small CPU boxes (see
+                # the low-mem profile notes near the top of this file).
+                "--Mapper.num_threads",
+                SFM_NUM_THREADS,
 
                 *mapper_args,
             ],
